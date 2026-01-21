@@ -1,0 +1,17 @@
+# Python 緩存
+__pycache__/
+*.py[cod]
+
+# 環境與套件
+.conda/
+venv/
+env/
+
+# 數據
+data/
+
+# 敏感資訊
+.env
+
+# 視覺化結果 (回測圖表)
+*.png
