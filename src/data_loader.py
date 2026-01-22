@@ -1,6 +1,8 @@
+from io import StringIO
 import yfinance as yf
 import pandas as pd
 import os
+import requests
 from datetime import datetime
 
 def fetch_stock_data(symbol, period="3y", interval="1d"):
@@ -30,3 +32,20 @@ def fetch_stock_data(symbol, period="3y", interval="1d"):
         df.to_csv(file_path)
         
     return df
+
+def get_sp500_tickers():
+    """從維基百科抓取 S&P 500 成份股代碼 (帶 User-Agent 偽裝)"""
+    url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+    
+    # 模擬瀏覽器的 Header
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    # 使用 requests 先把網頁抓下來
+    response = requests.get(url, headers=headers)
+    
+    # 再讓 pandas 解析抓回來的 HTML 內容
+    table = pd.read_html(StringIO(response.text))
+    df = table[0]
+    return df['Symbol'].tolist()

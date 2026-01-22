@@ -1,5 +1,5 @@
 from src.data_loader import fetch_stock_data
-from src.strategy import apply_ma_strategy
+from src.strategy import apply_double_factor_strategy
 from src.visualizer import plot_result
 import pandas as pd
 
@@ -21,31 +21,51 @@ def calculate_performance(df):
     
     return df
 
+def calculate_metrics(df):
+    """計算簡單績效指標"""
+    df['Daily_Return'] = df['Close'].pct_change()
+    # 模擬持倉：將信號填充 (例如 1 之後都是 1，直到出現 -1)
+    # 先將 0 轉為 NaN，然後執行前向填充，最後將剩餘的 NaN 補回 0
+    df['Position'] = df['Signal'].replace(0, float('nan')).ffill().shift(1).fillna(0)
+    # 強制轉換回整數型別，避免 Pandas 的轉型警告
+    df['Position'] = df['Position'].astype(int)
+    # 強制將賣出訊號 (-1) 視為空手 (0)
+    df['Position'] = df['Position'].apply(lambda x: 1 if x == 1 else 0)
+    
+    df['Strategy_Return'] = df['Daily_Return'] * df['Position']
+    
+    cum_market = (1 + df['Daily_Return']).cumprod().iloc[-1]
+    cum_strategy = (1 + df['Strategy_Return']).cumprod().iloc[-1]
+    
+    return (cum_market - 1) * 100, (cum_strategy - 1) * 100
+
 def main():
-    symbol = "NVDA"
-    df = fetch_stock_data(symbol, period="3y")
-    
-    if df.empty: return
+    # 準備你的珍珠與對照組
+    #targets = ["NVDA", "AAPL", "TSLA", "MSFT", "KO"]
+    targets = ["AOS", "ACN", "AES"]
+    results = []
 
-    # 執行策略 (現在你可以用 pandas-ta 了)
-    df = apply_ma_strategy(df)
-    
-    # 計算績效
-    df = calculate_performance(df)
-    
-    # 輸出結果
-    print(f"\n--- {symbol} 三年回測報告 ---")
-    market_final = (df['Cumulative_Market_Return'].iloc[-1] - 1) * 100
-    strategy_final = (df['Cumulative_Strategy_Return'].iloc[-1] - 1) * 100
-    
-    print(f"市場總報酬率 (Buy & Hold): {market_final:.2f}%")
-    print(f"策略總報酬率: {strategy_final:.2f}%")
-    
-    # 看看最後幾天的明細
-    print("\n最近五日明細:")
-    print(df[['Close', 'Signal', 'Cumulative_Strategy_Return']].tail())
+    print(f"{'Symbol':<8} | {'Market %':<12} | {'Strategy %':<12} | {'Beat?':<6}")
+    print("-" * 50)
 
-    plot_result(df, symbol)
+    for symbol in targets:
+        df = fetch_stock_data(symbol)
+        if df.empty: continue
+        
+        # 應用雙因子策略
+        df = apply_double_factor_strategy(df)
+        
+        # 計算績效
+        mkt_ret, str_ret = calculate_metrics(df)
+        
+        beat = "YES" if str_ret > mkt_ret else "NO"
+        print(f"{symbol:<8} | {mkt_ret:>11.2f}% | {str_ret:>11.2f}% | {beat:<6}")
+        
+        results.append({
+            "Symbol": symbol, 
+            "Market_Return": mkt_ret, 
+            "Strategy_Return": str_ret
+        })
 
 if __name__ == "__main__":
     main()
