@@ -1,71 +1,45 @@
 from src.data_loader import fetch_stock_data
 from src.strategy import apply_double_factor_strategy
+from src.analytics import calculate_full_metrics
 from src.visualizer import plot_result
 import pandas as pd
 
-def calculate_performance(df):
-    """
-    計算策略報酬率
-    """
-    # 假設我們在信號出現的隔天以開盤價交易（最保守的估計）
-    # 計算每日報酬率
-    df['Daily_Return'] = df['Close'].pct_change()
-    
-    # 計算策略報酬率 (如果 Signal 是 1，我們就賺/賠當天的 Daily_Return)
-    # 我們將 Signal 往後位移一格 (shift)，模擬「今天看到信號，明天進場」
-    df['Strategy_Return'] = df['Daily_Return'] * df['Signal'].shift(1)
-    
-    # 計算累積報酬率 (複利計算)
-    df['Cumulative_Market_Return'] = (1 + df['Daily_Return']).cumprod()
-    df['Cumulative_Strategy_Return'] = (1 + df['Strategy_Return']).cumprod()
-    
-    return df
-
-def calculate_metrics(df):
-    """計算簡單績效指標"""
-    df['Daily_Return'] = df['Close'].pct_change()
-    # 模擬持倉：將信號填充 (例如 1 之後都是 1，直到出現 -1)
-    # 先將 0 轉為 NaN，然後執行前向填充，最後將剩餘的 NaN 補回 0
-    df['Position'] = df['Signal'].replace(0, float('nan')).ffill().shift(1).fillna(0)
-    # 強制轉換回整數型別，避免 Pandas 的轉型警告
-    df['Position'] = df['Position'].astype(int)
-    # 強制將賣出訊號 (-1) 視為空手 (0)
-    df['Position'] = df['Position'].apply(lambda x: 1 if x == 1 else 0)
-    
-    df['Strategy_Return'] = df['Daily_Return'] * df['Position']
-    
-    cum_market = (1 + df['Daily_Return']).cumprod().iloc[-1]
-    cum_strategy = (1 + df['Strategy_Return']).cumprod().iloc[-1]
-    
-    return (cum_market - 1) * 100, (cum_strategy - 1) * 100
-
 def main():
-    # 準備你的珍珠與對照組
-    #targets = ["NVDA", "AAPL", "TSLA", "MSFT", "KO"]
-    targets = ["AOS", "ACN", "AES"]
-    results = []
+    # --- 壓力測試設定區 ---
+    # 測試 2022 通膨大回撤
+    test_start = "2022-01-01"
+    test_end = "2023-01-01"
+    
+    # 或者測試 2020 疫情崩盤
+    # test_start = "2020-01-01"
+    # test_end = "2020-07-01"
+    
+    targets = ["SPY", "QQQ", "NVDA", "GOOGL"]
+    # --------------------
 
-    print(f"{'Symbol':<8} | {'Market %':<12} | {'Strategy %':<12} | {'Beat?':<6}")
-    print("-" * 50)
+    print(f"🕵️ 歷史壓力測試區間: {test_start} 至 {test_end}")
+    print(f"{'Symbol':<8} | {'Market%':>10} | {'Strategy%':>10} | {'MDD%':>8} | {'Win%':>7}")
+    print("-" * 65)
 
     for symbol in targets:
-        df = fetch_stock_data(symbol)
-        if df.empty: continue
+        # 使用自定義日期抓取數據
+        df = fetch_stock_data(symbol, start=test_start, end=test_end)
         
-        # 應用雙因子策略
+        if df.empty:
+            print(f"無法取得 {symbol} 的數據")
+            continue
+        
+        # 1. 應用策略
         df = apply_double_factor_strategy(df)
         
-        # 計算績效
-        mkt_ret, str_ret = calculate_metrics(df)
+        # 2. 使用重構後的分析中樞
+        df, metrics = calculate_full_metrics(df)
         
-        beat = "YES" if str_ret > mkt_ret else "NO"
-        print(f"{symbol:<8} | {mkt_ret:>11.2f}% | {str_ret:>11.2f}% | {beat:<6}")
+        # 3. 顯示結果
+        print(f"{symbol:<8} | {metrics['Market%']:>10.2f}% | {metrics['Return%']:>10.2f}% | {metrics['MDD%']:>8.2f}% | {metrics['WinRate%']:>7.2f}%")
         
-        results.append({
-            "Symbol": symbol, 
-            "Market_Return": mkt_ret, 
-            "Strategy_Return": str_ret
-        })
+        # 4. 畫圖讓你直觀看避險效果
+        plot_result(df, f"{symbol}_StressTest")
 
 if __name__ == "__main__":
     main()

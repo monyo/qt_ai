@@ -14,6 +14,6 @@ def plot_result(df, symbol):
     plt.grid(True)
     
     # 儲存圖片
-    plt.savefig('backtest_result.png')
-    print("\n圖表已儲存為 backtest_result.png")
-    plt.show()
+    plt.savefig(f'data/backtest_{symbol}.png')
+    plt.close()
+    print(f"圖表已儲存為 backtest_{symbol}.png")
