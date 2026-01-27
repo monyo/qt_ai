@@ -1,0 +1,17 @@
+# 基礎數據處理
+pandas
+numpy
+pandas_ta
+yfinance
+
+# 網頁爬蟲與網路請求
+requests
+beautifulsoup4
+lxml
+
+# AI 與環境變數
+google-genai
+python-dotenv
+
+# 繪圖與視覺化
+matplotlib

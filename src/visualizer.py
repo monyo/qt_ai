@@ -7,7 +7,7 @@ def plot_result(df, symbol):
     plt.plot(df['Cumulative_Market_Return'], label='Market (Buy & Hold)', color='gray', alpha=0.5)
     
     # 畫出策略累積報酬率
-    plt.plot(df['Cumulative_Strategy_Return'], label='MA20 Strategy', color='blue')
+    plt.plot(df['Cumulative_Strategy_Return'], label='MA60+RSI Strategy', color='blue')
     
     plt.title(f"{symbol} Strategy vs Market Performance")
     plt.legend()

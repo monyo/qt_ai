@@ -6,10 +6,6 @@ import requests
 from datetime import datetime
 
 def fetch_stock_data(symbol, period="3y", start=None, end=None):
-    import os
-    import yfinance as yf
-    import pandas as pd
-    
     if not os.path.exists('data'):
         os.makedirs('data')
     
@@ -27,12 +23,15 @@ def fetch_stock_data(symbol, period="3y", start=None, end=None):
     ticker = yf.Ticker(symbol)
     
     if start and end:
-        df = ticker.history(start=start, end=end)
+        df = ticker.history(start=start, end=end, auto_adjust=True)
     else:
-        df = ticker.history(period=period)
+        df = ticker.history(period=period, auto_adjust=True)
         
     if not df.empty:
         df.to_csv(file_path)
+    if df.empty or len(df) < 100:
+        return pd.DataFrame()
+
     return df
     
 def get_sp500_tickers():
