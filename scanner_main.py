@@ -1,6 +1,6 @@
 import time
 import pandas as pd
-from src.analytics import calculate_full_metrics
+from src.backtester import run_backtest
 from src.data_loader import get_sp500_tickers, fetch_stock_data
 from src.strategy import apply_double_factor_strategy
 from src.visualizer import plot_result
@@ -38,7 +38,7 @@ def run_elite_scanner():
             # 2. 檢查「今日」是否有買入訊號
             if df['Signal'].iloc[-1] == 1:
                 # 3. 進行「歷史戰績」與「風險指標」計算
-                df, metrics = calculate_full_metrics(df)
+                df, metrics = run_backtest(df)
 
                 if metrics["Return%"] > 0: # 只要歷史戰績是正的就入選
                     elite_pearls.append({
@@ -58,6 +58,7 @@ def run_elite_scanner():
     res_df = pd.DataFrame(elite_pearls)
     print("\n" + "🏆 今日精英掃描報告 🏆")
     sorted_df = res_df.sort_values(by="Return%", ascending=False)
+    sorted_df.to_csv(f"data/scan_result_{pd.Timestamp.now().strftime('%Y%m%d')}.csv")
     print(sorted_df)
 
     # 自動為前三名的精英畫圖
@@ -67,7 +68,7 @@ def run_elite_scanner():
         # 繪圖時直接使用剛才掃描好的邏輯即可，不一定要重新 fetch
         df_to_plot = fetch_stock_data(s, period="3y")
         df_to_plot = apply_double_factor_strategy(df_to_plot)
-        df_plot, _ = calculate_full_metrics(df_to_plot) # 確保畫圖前欄位齊全
+        df_plot, _ = run_backtest(df_to_plot) # 確保畫圖前欄位齊全
         plot_result(df_to_plot, s)
 
 def get_action_plan(elite_pearls, total_balance=10000):

@@ -1,4 +1,5 @@
 import pandas_ta as ta
+from src.indicators import add_ma_indicators, add_rsi_indicators
 
 def apply_ma_strategy(df):
     """
@@ -20,17 +21,17 @@ def apply_double_factor_strategy(df, ma_length=60, rsi_length=14):
     """
     雙因子策略：MA (趨勢) + RSI (動能)
     """
-    # 1. 計算指標
-    df['MA'] = ta.sma(df['Close'], length=ma_length)
-    df['RSI'] = ta.rsi(df['Close'], length=rsi_length)
+    # 1. 呼叫工具計算指標
+    df = add_ma_indicators(df, length=60)
+    df = add_rsi_indicators(df, length=14)
     
     # 2. 定義買入條件
     # 條件：收盤價 > MA 且 RSI < 70 (避免追在高點)
-    buy_condition = (df['Close'] > df['MA']) & (df['RSI'] < 70)
+    buy_condition = (df['Close'] > df['MA60']) & (df['RSI'] < 70)
     
     # 定義賣出條件
     # 條件：收盤價 < MA (趨勢反轉) 或 RSI > 85 (極度過熱，先落袋為安)
-    sell_condition = (df['Close'] < df['MA']) | (df['RSI'] > 85)
+    sell_condition = (df['Close'] < df['MA60']) | (df['RSI'] > 85)
     
     # 3. 產生信號 (1: 買入, -1: 賣出, 0: 觀望)
     df['Signal'] = 0
