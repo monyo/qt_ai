@@ -1,0 +1,80 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Running the Application
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Set up API keys in .env file
+GEMINI_API_KEY=<your_key>
+
+# === 盤前建議系統（主要使用） ===
+# 首次使用：互動建立投資組合
+python premarket_main.py --init
+
+# 盤前：產出 actions 建議 → data/actions_YYYYMMDD.json
+python premarket_main.py
+
+# 新增白名單標的
+python premarket_main.py --watch PLTR COIN
+
+# 盤後：確認執行了哪些 actions → 更新 portfolio.json
+python confirm_main.py 2026-01-28
+
+# === 舊工具（仍可用） ===
+# 歷史壓力測試
+python main.py
+
+# 獨立掃描器
+python scanner_main.py
+```
+
+There is no test suite, linter, or CI/CD configured.
+
+## Architecture
+
+Quantitative stock scanning + position management system. Combines technical analysis (MA60+RSI) with LLM sentiment analysis.
+
+### Daily workflow
+
+```
+盤前: premarket_main.py → actions_YYYYMMDD.json (建議)
+盤後: confirm_main.py   → 標記已執行的 actions → 更新 portfolio.json
+```
+
+### Entry points
+
+| File | Purpose |
+|---|---|
+| `premarket_main.py` | 盤前建議主入口。載入持倉 → 報價 → 風控 → 掃描候選 → AI 情緒 → 輸出 actions |
+| `confirm_main.py` | 確認入口。讀取 actions 檔 → 逐筆確認/跳過 → 更新持倉 |
+| `scanner_main.py` | 獨立掃描器（可被 premarket_main 呼叫） |
+| `main.py` | 歷史壓力測試 |
+
+### Core modules in `src/`
+
+| Module | Role |
+|---|---|
+| `portfolio.py` | 持倉狀態管理。讀寫 `data/portfolio.json`（含 avg_price, cost_basis, transactions），白名單 `data/watchlist.json` |
+| `risk.py` | 風控：硬停損 -35%（以 avg_price 計），持倉上限 30 檔 |
+| `premarket.py` | 決策引擎。產出 HOLD/EXIT/ADD actions，含 source 和 version 欄位 |
+| `data_loader.py` | yfinance 資料取得（含快取）、S&P 500 ticker 列表、批次最新報價 |
+| `strategy.py` | 技術訊號：buy when Price > MA60 AND RSI < 70, sell when Price < MA60 OR RSI > 85 |
+| `backtester.py` | 回測引擎。Signal → Position 狀態機，計算 Return%, MDD%, WinRate% |
+| `ai_analyst.py` | 新聞抓取 + Gemini 2.0 Flash 情緒分析 (-1.0 to +1.0) |
+| `indicators.py` | SMA, RSI 指標（pandas_ta） |
+| `visualizer.py` | 策略 vs 大盤累積報酬圖 |
+
+### Key design details
+
+- **Actions 狀態流**：`pending` → `confirmed`/`skipped`，HOLD 為 `auto`
+- **EXIT 優先序**：硬停損（-35%，無條件）> 策略賣出（技術面，可跳過）
+- **VOO 保護**：core=true 持倉永遠只產出 HOLD
+- **候選池**：S&P 500 前 50 + `data/watchlist.json` 白名單，白名單也走完整分析流程
+- **Sizing**：等權重 cash / available_slots
+- **報價定義**：前一交易日收盤價（盤前 yfinance 最後一筆 Close）
+- Signal 是事件（1/-1/0），backtester 轉為 Position（0/1）狀態機
+- AI 情緒在 API 額度用完時降級為中性 (0.0)

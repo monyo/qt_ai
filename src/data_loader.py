@@ -50,3 +50,21 @@ def get_sp500_tickers():
     table = pd.read_html(StringIO(response.text))
     df = table[0]
     return df['Symbol'].tolist()
+
+
+def fetch_current_prices(symbols):
+    """批次取得最新收盤價（前一個交易日 Close）
+
+    盤前執行時，yfinance 回傳的最新 Close 即為昨日收盤。
+    回傳 dict: {symbol: price}
+    """
+    prices = {}
+    for symbol in symbols:
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="5d", auto_adjust=True)
+            if not hist.empty:
+                prices[symbol] = round(hist["Close"].iloc[-1], 2)
+        except Exception as e:
+            print(f"⚠ 無法取得 {symbol} 報價: {e}")
+    return prices
