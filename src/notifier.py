@@ -95,7 +95,16 @@ class GmailNotifier:
             for a in adds:
                 momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
                 rank = a.get("momentum_rank", "?")
-                lines.append(f"  #{rank} {a['symbol']:<6} {momentum}")
+                shares = a.get("suggested_shares", 0)
+
+                # Format alpha_1y
+                alpha_str = ""
+                alpha_1y = a.get("alpha_1y")
+                if alpha_1y is not None:
+                    alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
+                    alpha_str = f"  1Y: {alpha_1y:+.0f}% {alpha_emoji}"
+
+                lines.append(f"  #{rank} {a['symbol']:<6} 建議 {shares} 股 @ ${a.get('current_price', 0):.2f}  {momentum}{alpha_str}")
             lines.append("")
 
         return "\n".join(lines)
@@ -150,11 +159,21 @@ class GmailNotifier:
             rows = ""
             for a in adds:
                 momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
-                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td>{momentum}</td></tr>'
+                shares = a.get("suggested_shares", 0)
+                price = a.get("current_price", 0)
+
+                # Format alpha_1y for HTML
+                alpha_html = "<td></td>"
+                alpha_1y = a.get("alpha_1y")
+                if alpha_1y is not None:
+                    alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
+                    alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>"
+                
+                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td>{shares} 股</td><td>${price:.2f}</td><td>{momentum}</td>{alpha_html}</tr>'
             adds_html = f'''
             <h3 style="color:#28a745;">ADD 建議 ({len(adds)} 檔)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;">排名</th><th>標的</th><th>動能</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">排名</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>1Y vs SPY</th></tr>
                 {rows}
             </table>'''
 

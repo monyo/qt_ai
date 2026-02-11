@@ -16,7 +16,7 @@ from src.risk import check_position_limit
 from src.premarket import generate_actions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
-from src.momentum import rank_by_momentum, print_momentum_report
+from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch
 from src.notifier import GmailNotifier
 
 
@@ -124,7 +124,7 @@ def run_premarket():
     sector_exposure = check_holdings_sector_exposure(held_symbols)
 
     # 2. 組合候選池：SP500 前 100 + 白名單 + 持倉
-    sp500 = get_sp500_tickers()[:100]
+    sp500 = get_sp500_tickers()
     watchlist = load_watchlist()
     wl_symbols = watchlist.get("symbols", [])
     all_tickers = list(dict.fromkeys(sp500 + wl_symbols + held_symbols))
@@ -151,8 +151,14 @@ def run_premarket():
         save_portfolio(portfolio)
         print("已更新持倉最高價記錄")
 
+    # 4.7 計算 1 年超額報酬（ADD 候選 + 持倉，用於長期績效參考）
+    add_candidates = [m["symbol"] for m in momentum_ranks[:10] if m["symbol"] not in positions]
+    alpha_symbols = list(set(add_candidates + held_symbols))
+    print(f"正在計算 {len(alpha_symbols)} 檔標的的 1 年超額報酬...")
+    alpha_1y_map = calculate_alpha_batch(alpha_symbols)
+
     # 5. 產出 actions（使用動能排名 + 三層出場）
-    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks)
+    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map)
 
     # 6. 計算投組總值
     total_value = portfolio.get("cash", 0)
@@ -239,15 +245,27 @@ def run_premarket():
         for a in holds:
             pnl = f"{a['pnl_pct']:+.2f}%" if a.get("pnl_pct") is not None else "N/A"
             momentum = f"動能: {a['momentum']:+.1f}%" if a.get("momentum") is not None else ""
+            alpha = a.get('alpha_1y')
+            if alpha is not None:
+                alpha_emoji = "🟢" if alpha > 0 else ("🟡" if alpha > -20 else "🔴")
+                alpha_str = f"  1Y: {alpha:+.0f}% {alpha_emoji}"
+            else:
+                alpha_str = ""
             tag = "[core]" if a["source"] == "core_hold" else "      "
-            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {pnl}  {momentum}")
+            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {pnl}  {momentum}{alpha_str}")
         print()
 
     if adds:
         print("--- ADD (建議買入) ---")
         for a in adds:
-            momentum_str = f"  動能: +{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
-            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']:<6} 建議 {a['suggested_shares']} 股 @ ${a.get('current_price', 0):.2f}{momentum_str}")
+            momentum_str = f"動能: +{a.get('momentum', 0):.1f}%"
+            alpha = a.get('alpha_1y')
+            if alpha is not None:
+                alpha_emoji = "🟢" if alpha > 0 else ("🟡" if alpha > -20 else "🔴")
+                alpha_str = f"  1Y vs SPY: {alpha:+.0f}% {alpha_emoji}"
+            else:
+                alpha_str = ""
+            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']:<6} 建議 {a['suggested_shares']} 股 @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
             print(f"         原因: {a['reason']}")
         print()
 

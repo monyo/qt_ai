@@ -4,7 +4,7 @@ from src.risk import check_all_exit_conditions, check_position_limit
 VERSION = "0.4.0"  # 三層出場策略版本
 
 
-def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None):
+def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None):
     """盤前決策引擎（動能策略 + 三層出場）
 
     Args:
@@ -12,6 +12,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         current_prices: {symbol: price} 最新報價
         ma200_prices: {symbol: ma200_value} MA200 資料
         momentum_ranks: [{"symbol": str, "momentum": float, "rank": int}, ...]
+        alpha_1y_map: {symbol: alpha_1y} 1 年超額報酬（vs SPY）
 
     Returns:
         actions: list of action dicts
@@ -20,6 +21,8 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         ma200_prices = {}
     if momentum_ranks is None:
         momentum_ranks = []
+    if alpha_1y_map is None:
+        alpha_1y_map = {}
 
     actions = []
     action_id = 0
@@ -54,6 +57,9 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         # 取得最高價資訊
         high_price = pos.get("high_since_entry")
 
+        # 取得 1 年超額報酬
+        alpha_1y = alpha_1y_map.get(symbol)
+
         if pos.get("core", False):
             # 核心持倉：永遠 HOLD
             actions.append({
@@ -66,6 +72,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "high_since_entry": high_price,
                 "pnl_pct": pnl_pct,
                 "momentum": momentum,
+                "alpha_1y": alpha_1y,
                 "reason": "核心持倉",
                 "source": "core_hold",
                 "status": "auto",
@@ -83,6 +90,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "high_since_entry": high_price,
                 "pnl_pct": pnl_pct,
                 "momentum": momentum,
+                "alpha_1y": alpha_1y,
                 "reason": exit_info["message"],
                 "source": exit_info["reason"],
                 "status": "pending",
@@ -109,6 +117,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "pnl_pct": pnl_pct,
                 "momentum": momentum,
                 "momentum_rank": rank,
+                "alpha_1y": alpha_1y,
                 "reason": reason,
                 "source": "momentum",
                 "status": "auto",
@@ -150,16 +159,19 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             momentum = m["momentum"]
             rank = m["rank"]
             price = current_prices.get(symbol, 0)
+            alpha_1y = alpha_1y_map.get(symbol)
 
             if price > 0 and position_size > 0:
                 suggested_shares = math.floor(position_size / price)
             else:
                 suggested_shares = 0
 
-            # 組裝原因
+            # 組裝原因（加入長期表現警示）
             reason = f"動能排名 #{rank}（+{momentum:.1f}%）"
             if suggested_shares == 0:
                 reason += "（現金不足）"
+            if alpha_1y is not None and alpha_1y < -20:
+                reason += f"⚠️ 1年落後大盤 {alpha_1y:.0f}%"
 
             actions.append({
                 "id": action_id,
@@ -169,6 +181,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "current_price": price,
                 "momentum": momentum,
                 "momentum_rank": rank,
+                "alpha_1y": alpha_1y,
                 "reason": reason,
                 "source": "momentum",
                 "status": "pending",
