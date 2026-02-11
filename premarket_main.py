@@ -12,6 +12,7 @@ from src.risk import check_position_limit
 from src.premarket import generate_actions, VERSION
 from src.ai_analyst import fetch_latest_news_yf, analyze_sentiment_batch_with_gemini
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
+from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
 from scanner_main import scan_candidates
 
 
@@ -173,7 +174,12 @@ def run_premarket():
         price = current_prices.get(symbol, pos["avg_price"])
         total_value += price * pos["shares"]
 
-    # 7. 儲存 actions
+    # 7. 載入年度快照並計算年度 P&L（用於儲存）
+    current_year = date.today().year
+    snapshot = load_snapshot(current_year)
+    yearly_pnl = calculate_yearly_pnl(total_value, snapshot) if snapshot else None
+
+    # 7.5 儲存 actions
     actions_output = {
         "date": str(date.today()),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -182,6 +188,7 @@ def run_premarket():
             "total_value": round(total_value, 2),
             "cash": portfolio.get("cash", 0),
             "individual_count": individual,
+            "yearly_pnl": yearly_pnl,
         },
         "sector_status": {
             "status": sector_summary["status"],
@@ -202,6 +209,11 @@ def run_premarket():
     print(f"  投組總值: ${total_value:>12,.2f}")
     print(f"  現金:     ${portfolio.get('cash', 0):>12,.2f}")
     print(f"  個股:     {individual}/30 檔")
+    if yearly_pnl:
+        pnl_sign = "+" if yearly_pnl["pnl_amount"] >= 0 else ""
+        print(f"  {current_year}年度:  {pnl_sign}${yearly_pnl['pnl_amount']:>10,.2f} ({pnl_sign}{yearly_pnl['pnl_pct']:.1f}%)")
+    else:
+        print(f"  {current_year}年度:  (尚無快照，執行 --snapshot 建立)")
     print(f"{'='*60}")
 
     # 板塊健康狀態
@@ -263,16 +275,54 @@ def run_watch(symbols):
     print(f"白名單已更新：{wl['symbols']}")
 
 
+def run_snapshot(year: int = None):
+    """建立年度快照"""
+    if year is None:
+        year = date.today().year
+
+    portfolio = load_portfolio()
+    if not portfolio.get("positions"):
+        print("尚未建立投資組合。請先執行: python premarket_main.py --init")
+        return
+
+    # 檢查是否已存在
+    existing = load_snapshot(year)
+    if existing:
+        print(f"警告: {year} 年快照已存在 (建立於 {existing.get('created_at')})")
+        print(f"  年初總值: ${existing['total_value']:,.2f}")
+        confirm = input("是否覆蓋？(y/n): ").strip().lower()
+        if confirm != "y":
+            print("已取消")
+            return
+
+    snapshot = create_year_start_snapshot(portfolio, year)
+    path = save_snapshot(snapshot, year)
+
+    print(f"\n{'='*50}")
+    print(f"  {year} 年度快照已建立")
+    print(f"{'='*50}")
+    print(f"  基準日期: {snapshot['date']}")
+    print(f"  年初總值: ${snapshot['total_value']:,.2f}")
+    print(f"  現金:     ${snapshot['cash']:,.2f}")
+    print(f"  持倉數:   {len(snapshot['positions'])} 檔")
+    print(f"{'='*50}")
+    print(f"\n已儲存至: {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="盤前建議系統")
     parser.add_argument("--init", action="store_true", help="互動式建立初始投資組合")
     parser.add_argument("--watch", nargs="+", metavar="SYMBOL", help="新增白名單標的")
+    parser.add_argument("--snapshot", nargs="?", const=date.today().year, type=int,
+                        metavar="YEAR", help="建立年度快照（預設當年）")
     args = parser.parse_args()
 
     if args.init:
         run_init()
     elif args.watch:
         run_watch(args.watch)
+    elif args.snapshot:
+        run_snapshot(args.snapshot)
     else:
         run_premarket()
 
