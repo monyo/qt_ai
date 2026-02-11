@@ -11,6 +11,7 @@ from src.data_loader import get_sp500_tickers, fetch_current_prices
 from src.risk import check_position_limit
 from src.premarket import generate_actions, VERSION
 from src.ai_analyst import fetch_latest_news_yf, analyze_sentiment_batch_with_gemini
+from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from scanner_main import scan_candidates
 
 
@@ -88,6 +89,12 @@ def run_premarket():
     print(f"=== 盤前分析 {date.today()} ===\n")
     individual = get_individual_count(portfolio)
     print(f"持倉：{len(positions)} 檔（個股 {individual}/30），現金 ${portfolio.get('cash', 0):,.2f}\n")
+
+    # 1.5 板塊相對強弱檢查
+    print("正在檢查板塊相對強弱...")
+    sector_summary = get_sector_summary(lookback_days=5)
+    held_symbols = list(positions.keys())
+    sector_exposure = check_holdings_sector_exposure(held_symbols)
 
     # 2. 取得所有持倉的最新報價
     held_symbols = list(positions.keys())
@@ -176,6 +183,11 @@ def run_premarket():
             "cash": portfolio.get("cash", 0),
             "individual_count": individual,
         },
+        "sector_status": {
+            "status": sector_summary["status"],
+            "alerts": [a["message"] for a in sector_summary["alerts"]],
+            "tech_ratio": sector_exposure["tech_ratio"],
+        },
         "actions": actions,
     }
 
@@ -190,7 +202,26 @@ def run_premarket():
     print(f"  投組總值: ${total_value:>12,.2f}")
     print(f"  現金:     ${portfolio.get('cash', 0):>12,.2f}")
     print(f"  個股:     {individual}/30 檔")
-    print(f"{'='*60}\n")
+    print(f"{'='*60}")
+
+    # 板塊健康狀態
+    print(f"\n--- 板塊相對強弱 (過去5日) {sector_summary['status_emoji']} ---")
+    if sector_summary.get("benchmark"):
+        print(f"  大盤 SPY: {sector_summary['benchmark']['return']*100:+.1f}%")
+    for sym, data in sector_summary.get("sectors", {}).items():
+        rel = data["relative"]
+        emoji = "🔴" if rel < -0.05 else ("🟡" if rel < 0 else "🟢")
+        print(f"  {emoji} {data['name']:<6} {data['return']*100:+.1f}% (vs SPY: {rel*100:+.1f}%)")
+
+    if sector_summary["alerts"]:
+        print(f"\n  ⚠️  板塊警告：")
+        for alert in sector_summary["alerts"]:
+            print(f"     - {alert['message']}")
+
+    if sector_exposure["warning"]:
+        print(f"\n  🚨 注意：你的持股 {sector_exposure['tech_ratio']*100:.0f}% 是科技相關，而科技板塊正在走弱！")
+
+    print()
 
     # 分類印出
     exits = [a for a in actions if a["action"] == "EXIT"]

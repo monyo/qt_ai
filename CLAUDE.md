@@ -30,6 +30,13 @@ python main.py
 
 # 獨立掃描器
 python scanner_main.py
+
+# === 風控工具 ===
+# 停損策略回測比較
+python stop_loss_compare.py NVDA SHOP TSLA GOOG MU
+
+# 板塊相對強弱獨立檢查
+python -c "from src.sector_monitor import print_sector_report; print_sector_report()"
 ```
 
 There is no test suite, linter, or CI/CD configured.
@@ -67,6 +74,8 @@ Quantitative stock scanning + position management system. Combines technical ana
 | `ai_analyst.py` | 新聞抓取 + Gemini 2.0 Flash 情緒分析 (-1.0 to +1.0) |
 | `indicators.py` | SMA, RSI 指標（pandas_ta） |
 | `visualizer.py` | 策略 vs 大盤累積報酬圖 |
+| `sector_monitor.py` | 板塊相對強弱監控。追蹤 XLK/IGV/SMH vs SPY，板塊跑輸 -5% 時警告 |
+| `stop_loss_backtester.py` | 停損策略回測。支援 fixed / trailing stop-loss 比較 |
 
 ### Key design details
 
@@ -78,3 +87,5 @@ Quantitative stock scanning + position management system. Combines technical ana
 - **報價定義**：前一交易日收盤價（盤前 yfinance 最後一筆 Close）
 - Signal 是事件（1/-1/0），backtester 轉為 Position（0/1）狀態機
 - AI 情緒在 API 額度用完時降級為中性 (0.0)
+- **板塊監控**：盤前報告顯示科技/軟體/半導體 vs SPY 相對強弱，當板塊跑輸 >5% 時警告
+- **曝險警告**：當持股科技比例高 + 科技板塊走弱時，會特別提醒
