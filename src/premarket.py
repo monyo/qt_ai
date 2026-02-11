@@ -1,23 +1,27 @@
 import math
-from src.risk import check_stop_loss, check_position_limit
+from src.risk import check_all_exit_conditions, check_position_limit
 
-VERSION = "0.2.0"
+VERSION = "0.4.0"  # 三層出場策略版本
 
 
-def generate_actions(portfolio, current_prices, candidates=None, sentiment_scores=None):
-    """盤前決策引擎
+def generate_actions(portfolio, current_prices, ma200_prices=None,
+                     momentum_ranks=None, sentiment_scores=None):
+    """盤前決策引擎（動能策略 + 三層出場）
 
     Args:
         portfolio: 持倉狀態 dict
         current_prices: {symbol: price} 最新報價
-        candidates: scan_candidates() 回傳的候選股列表 (可選)
+        ma200_prices: {symbol: ma200_value} MA200 資料
+        momentum_ranks: [{"symbol": str, "momentum": float, "rank": int}, ...]
         sentiment_scores: {symbol: {"score": float, "reason": str}} (可選)
 
     Returns:
         actions: list of action dicts
     """
-    if candidates is None:
-        candidates = []
+    if ma200_prices is None:
+        ma200_prices = {}
+    if momentum_ranks is None:
+        momentum_ranks = []
     if sentiment_scores is None:
         sentiment_scores = {}
 
@@ -25,17 +29,19 @@ def generate_actions(portfolio, current_prices, candidates=None, sentiment_score
     action_id = 0
     positions = portfolio.get("positions", {})
 
-    # === 1. 停損檢查（優先序最高） ===
-    stop_loss_list = check_stop_loss(positions, current_prices)
-    stop_loss_symbols = {item["symbol"] for item in stop_loss_list}
+    # 建立動能查詢表
+    momentum_map = {m["symbol"]: m for m in momentum_ranks}
 
-    # === 2. 從 candidates 取得賣出訊號 ===
-    sell_signal_symbols = set()
-    for c in candidates:
-        if c.get("has_sell_signal"):
-            sell_signal_symbols.add(c["Symbol"])
+    # === 1. 三層出場條件檢查 ===
+    # 1. 移動停利（-15% from high）
+    # 2. MA200 停損
+    # 3. 極端停損（-35% from cost）
+    exit_signals = check_all_exit_conditions(
+        positions, current_prices, ma200_prices,
+        trailing_threshold=-0.15, hard_threshold=-0.35
+    )
 
-    # === 3. 遍歷所有持倉，產出 HOLD / EXIT ===
+    # === 2. 遍歷所有持倉，產出 HOLD / EXIT ===
     for symbol, pos in positions.items():
         price = current_prices.get(symbol)
         pnl_pct = None
@@ -43,6 +49,14 @@ def generate_actions(portfolio, current_prices, candidates=None, sentiment_score
             pnl_pct = round((price - pos["avg_price"]) / pos["avg_price"] * 100, 2)
 
         action_id += 1
+
+        # 取得該持倉的動能資訊
+        m_info = momentum_map.get(symbol, {})
+        momentum = m_info.get("momentum")
+        rank = m_info.get("rank")
+
+        # 取得最高價資訊
+        high_price = pos.get("high_since_entry")
 
         if pos.get("core", False):
             # 核心持倉：永遠 HOLD
@@ -53,14 +67,16 @@ def generate_actions(portfolio, current_prices, candidates=None, sentiment_score
                 "shares": pos["shares"],
                 "current_price": price,
                 "avg_price": pos["avg_price"],
+                "high_since_entry": high_price,
                 "pnl_pct": pnl_pct,
+                "momentum": momentum,
                 "reason": "核心持倉",
                 "source": "core_hold",
                 "status": "auto",
             })
-        elif symbol in stop_loss_symbols:
-            # 硬停損觸發
-            sl = next(item for item in stop_loss_list if item["symbol"] == symbol)
+        elif symbol in exit_signals:
+            # 觸發出場條件
+            exit_info = exit_signals[symbol]
             actions.append({
                 "id": action_id,
                 "action": "EXIT",
@@ -68,32 +84,23 @@ def generate_actions(portfolio, current_prices, candidates=None, sentiment_score
                 "shares": pos["shares"],
                 "current_price": price,
                 "avg_price": pos["avg_price"],
+                "high_since_entry": high_price,
                 "pnl_pct": pnl_pct,
-                "reason": f"硬停損觸發（{sl['pnl_pct']}%）",
-                "source": "stop_loss",
-                "status": "pending",
-            })
-        elif symbol in sell_signal_symbols:
-            # 技術面賣出訊號
-            actions.append({
-                "id": action_id,
-                "action": "EXIT",
-                "symbol": symbol,
-                "shares": pos["shares"],
-                "current_price": price,
-                "avg_price": pos["avg_price"],
-                "pnl_pct": pnl_pct,
-                "reason": "技術面賣出訊號（MA60/RSI）",
-                "source": "strategy_signal",
+                "momentum": momentum,
+                "reason": exit_info["message"],
+                "source": exit_info["reason"],
                 "status": "pending",
             })
         else:
-            # 繼續持有
+            # 繼續持有（讓獲利奔跑）
             reason = "持有中"
-            # 嘗試附加技術面摘要
-            c_match = next((c for c in candidates if c["Symbol"] == symbol), None)
-            if c_match and c_match.get("has_today_signal"):
-                reason = "持有中，技術面持續看多"
+            if momentum is not None:
+                if momentum > 10:
+                    reason = f"持有中，動能強勁 (+{momentum:.1f}%)"
+                elif momentum > 0:
+                    reason = f"持有中，動能正向 (+{momentum:.1f}%)"
+                else:
+                    reason = f"持有中，動能偏弱 ({momentum:.1f}%)"
 
             actions.append({
                 "id": action_id,
@@ -102,35 +109,38 @@ def generate_actions(portfolio, current_prices, candidates=None, sentiment_score
                 "shares": pos["shares"],
                 "current_price": price,
                 "avg_price": pos["avg_price"],
+                "high_since_entry": high_price,
                 "pnl_pct": pnl_pct,
+                "momentum": momentum,
+                "momentum_rank": rank,
                 "reason": reason,
-                "source": "strategy_signal",
+                "source": "momentum",
                 "status": "auto",
             })
 
-    # === 4. 新增買入候選 ===
+    # === 3. 新增買入候選（依動能排名） ===
     available_slots = check_position_limit(portfolio)
-    if available_slots > 0 and candidates:
+    if available_slots > 0 and momentum_ranks:
         cash = portfolio.get("cash", 0)
         position_size = cash / max(available_slots, 1) if cash > 0 else 0
 
-        # 篩選：有今日買入訊號 + 歷史報酬正 + 尚未持有
+        # 篩選：動能 > 0 + 尚未持有
         buy_candidates = [
-            c for c in candidates
-            if c.get("has_today_signal")
-            and c.get("Return%", -999) > 0
-            and c["Symbol"] not in positions
+            m for m in momentum_ranks
+            if m.get("momentum", 0) > 0
+            and m["symbol"] not in positions
         ]
-        # 依 Return% 排序
-        buy_candidates.sort(key=lambda x: x.get("Return%", 0), reverse=True)
+        # 已經按動能排序，最多顯示 5 檔（避免資訊過載）
+        max_add = min(5, available_slots)
 
-        for c in buy_candidates[:available_slots]:
+        for m in buy_candidates[:max_add]:
             action_id += 1
-            symbol = c["Symbol"]
-            price = current_prices.get(symbol, c.get("Price", 0))
+            symbol = m["symbol"]
+            momentum = m["momentum"]
+            rank = m["rank"]
+            price = current_prices.get(symbol, 0)
             sentiment = sentiment_scores.get(symbol, {})
             sentiment_score = float(sentiment.get("score", 0.0))
-            sentiment_reason = sentiment.get("reason", "")
 
             if price > 0 and position_size > 0:
                 suggested_shares = math.floor(position_size / price)
@@ -138,22 +148,14 @@ def generate_actions(portfolio, current_prices, candidates=None, sentiment_score
                 suggested_shares = 0
 
             # 組裝原因
-            reason_parts = []
-            if c.get("has_today_signal"):
-                reason_parts.append("技術面買入訊號")
+            reason = f"動能排名 #{rank}（+{momentum:.1f}%）"
             if sentiment_score > 0.3:
-                reason_parts.append(f"AI 情緒 {sentiment_score}（看多）")
+                reason += f" + AI 看多 ({sentiment_score:.1f})"
             elif sentiment_score < -0.3:
-                reason_parts.append(f"AI 情緒 {sentiment_score}（看空）")
-            elif sentiment_reason:
-                reason_parts.append(f"AI 情緒 {sentiment_score}（中立）")
-            reason = " + ".join(reason_parts) if reason_parts else "技術面買入訊號"
+                reason += f" + AI 看空 ({sentiment_score:.1f})"
 
             if suggested_shares == 0:
                 reason += "（現金不足）"
-
-            # 判斷 source
-            source = c.get("source", "scanner")
 
             actions.append({
                 "id": action_id,
@@ -161,10 +163,11 @@ def generate_actions(portfolio, current_prices, candidates=None, sentiment_score
                 "symbol": symbol,
                 "suggested_shares": suggested_shares,
                 "current_price": price,
+                "momentum": momentum,
+                "momentum_rank": rank,
                 "reason": reason,
-                "source": source,
+                "source": "momentum",
                 "sentiment": sentiment_score,
-                "backtest_return_pct": c.get("Return%"),
                 "status": "pending",
             })
 

@@ -3,9 +3,13 @@ import json
 import os
 from datetime import datetime, date
 
+import pandas as pd
+import yfinance as yf
+
 from src.portfolio import (
     load_portfolio, save_portfolio, get_individual_count,
     load_watchlist, save_watchlist, add_to_watchlist,
+    update_high_prices, initialize_high_prices,
 )
 from src.data_loader import get_sp500_tickers, fetch_current_prices
 from src.risk import check_position_limit
@@ -13,7 +17,29 @@ from src.premarket import generate_actions, VERSION
 from src.ai_analyst import fetch_latest_news_yf, analyze_sentiment_batch_with_gemini
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
-from scanner_main import scan_candidates
+from src.momentum import rank_by_momentum, print_momentum_report
+
+
+def fetch_ma200_prices(symbols):
+    """取得多檔標的的 MA200 值
+
+    Args:
+        symbols: 股票代碼列表
+
+    Returns:
+        dict: {symbol: ma200_value}
+    """
+    ma200_prices = {}
+    for symbol in symbols:
+        try:
+            df = yf.Ticker(symbol).history(period="1y")
+            if len(df) >= 200:
+                ma200 = df['Close'].rolling(200).mean().iloc[-1]
+                if not pd.isna(ma200):
+                    ma200_prices[symbol] = round(ma200, 2)
+        except Exception:
+            pass
+    return ma200_prices
 
 
 def run_init():
@@ -75,7 +101,7 @@ def run_init():
 
 
 def run_premarket():
-    """產出盤前建議"""
+    """產出盤前建議（動能策略 + 三層出場）"""
     os.makedirs("data", exist_ok=True)
     today_str = date.today().strftime("%Y%m%d")
 
@@ -87,7 +113,7 @@ def run_premarket():
         print("尚未建立投資組合。請先執行: python premarket_main.py --init")
         return
 
-    print(f"=== 盤前分析 {date.today()} ===\n")
+    print(f"=== 盤前分析 {date.today()} （三層出場策略）===\n")
     individual = get_individual_count(portfolio)
     print(f"持倉：{len(positions)} 檔（個股 {individual}/30），現金 ${portfolio.get('cash', 0):,.2f}\n")
 
@@ -97,60 +123,47 @@ def run_premarket():
     held_symbols = list(positions.keys())
     sector_exposure = check_holdings_sector_exposure(held_symbols)
 
-    # 2. 取得所有持倉的最新報價
-    held_symbols = list(positions.keys())
-    print(f"正在取得 {len(held_symbols)} 檔持倉報價...")
-    current_prices = fetch_current_prices(held_symbols)
+    # 2. 組合候選池：SP500 前 100 + 白名單 + 持倉
+    sp500 = get_sp500_tickers()[:100]
+    watchlist = load_watchlist()
+    wl_symbols = watchlist.get("symbols", [])
+    all_tickers = list(dict.fromkeys(sp500 + wl_symbols + held_symbols))
 
-    # 3. 組合候選池：SP500 前 50 + 白名單
-    available_slots = check_position_limit(portfolio)
-    candidates = []
-    cache_for_plot = {}
+    print(f"\n正在計算 {len(all_tickers)} 檔標的動能（SP500 前100 + 白名單 {len(wl_symbols)} 檔 + 持倉）...")
 
-    if available_slots > 0:
-        # 取得 S&P 500 + watchlist
-        sp500 = get_sp500_tickers()[:50]
-        watchlist = load_watchlist()
-        wl_symbols = watchlist.get("symbols", [])
+    # 3. 計算動能排名
+    momentum_ranks = rank_by_momentum(all_tickers, period=21)
 
-        # 合併去重（也包含已持有的，以取得策略訊號）
-        all_tickers = list(dict.fromkeys(sp500 + wl_symbols + held_symbols))
+    # 4. 取得報價（動能前 20 名 + 持倉）
+    top_symbols = [m["symbol"] for m in momentum_ranks[:20]]
+    symbols_for_price = list(set(top_symbols + held_symbols))
+    print(f"正在取得 {len(symbols_for_price)} 檔報價...")
+    current_prices = fetch_current_prices(symbols_for_price)
 
-        print(f"\n正在掃描 {len(all_tickers)} 檔標的（SP500 前50 + 白名單 {len(wl_symbols)} 檔 + 持倉）...")
-        candidates, cache_for_plot = scan_candidates(all_tickers)
+    # 4.5 取得持倉的 MA200 資料（用於出場判斷）
+    print(f"正在取得 {len(held_symbols)} 檔持倉的 MA200...")
+    ma200_prices = fetch_ma200_prices(held_symbols)
 
-        # 標記 source
-        wl_set = set(s.upper() for s in wl_symbols)
-        for c in candidates:
-            if c["Symbol"].upper() in wl_set:
-                c["source"] = "watchlist"
-            else:
-                c["source"] = "scanner"
+    # 4.6 初始化/更新最高價追蹤
+    initialize_high_prices(portfolio, current_prices)
+    high_updated = update_high_prices(portfolio, current_prices)
+    if high_updated:
+        save_portfolio(portfolio)
+        print("已更新持倉最高價記錄")
 
-        # 更新 current_prices
-        for c in candidates:
-            if c["Symbol"] not in current_prices and c.get("Price"):
-                current_prices[c["Symbol"]] = c["Price"]
-    else:
-        # 持倉已滿，只掃描已持有的標的（取得策略訊號）
-        print(f"\n個股已達 30 檔上限，僅檢查持倉訊號...")
-        candidates, cache_for_plot = scan_candidates(held_symbols)
-
-    # 4. AI 情緒分析（對新候選）
+    # 5. AI 情緒分析（動能前 5 名且未持有）
     sentiment_scores = {}
     new_buy_candidates = [
-        c for c in candidates
-        if c.get("has_today_signal")
-        and c.get("Return%", -999) > 0
-        and c["Symbol"] not in positions
+        m for m in momentum_ranks[:10]
+        if m["momentum"] > 0 and m["symbol"] not in positions
     ]
 
     if new_buy_candidates:
-        top_for_ai = new_buy_candidates[:10]
+        top_for_ai = new_buy_candidates[:5]
         symbol_to_headlines = {}
-        print(f"\n正在為 {len(top_for_ai)} 檔候選抓取新聞...")
-        for c in top_for_ai:
-            sym = c["Symbol"]
+        print(f"\n正在為動能前 {len(top_for_ai)} 名抓取新聞...")
+        for m in top_for_ai:
+            sym = m["symbol"]
             try:
                 symbol_to_headlines[sym] = fetch_latest_news_yf(sym, lookback_hours=24, limit=5)
             except Exception as e:
@@ -165,8 +178,8 @@ def run_premarket():
                     "reason": result.get("reason", ""),
                 }
 
-    # 5. 產出 actions
-    actions = generate_actions(portfolio, current_prices, candidates, sentiment_scores)
+    # 6. 產出 actions（使用動能排名 + 三層出場）
+    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, sentiment_scores)
 
     # 6. 計算投組總值
     total_value = portfolio.get("cash", 0)
@@ -252,16 +265,17 @@ def run_premarket():
         print("--- HOLD (繼續持有) ---")
         for a in holds:
             pnl = f"{a['pnl_pct']:+.2f}%" if a.get("pnl_pct") is not None else "N/A"
+            momentum = f"動能: {a['momentum']:+.1f}%" if a.get("momentum") is not None else ""
             tag = "[core]" if a["source"] == "core_hold" else "      "
-            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {pnl}")
+            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {pnl}  {momentum}")
         print()
 
     if adds:
         print("--- ADD (建議買入) ---")
         for a in adds:
             sentiment_str = f"  情緒: {a.get('sentiment', 0):.1f}" if a.get("sentiment") else ""
-            bt_str = f"  回測: {a.get('backtest_return_pct', 0):.1f}%" if a.get("backtest_return_pct") else ""
-            print(f"  [{a['source']}] {a['symbol']:<6} 建議 {a['suggested_shares']} 股 @ ${a.get('current_price', 0):.2f}{sentiment_str}{bt_str}")
+            momentum_str = f"  動能: +{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
+            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']:<6} 建議 {a['suggested_shares']} 股 @ ${a.get('current_price', 0):.2f}{momentum_str}{sentiment_str}")
             print(f"         原因: {a['reason']}")
         print()
 
@@ -273,6 +287,32 @@ def run_watch(symbols):
     """新增白名單標的"""
     wl = add_to_watchlist(symbols)
     print(f"白名單已更新：{wl['symbols']}")
+
+
+def run_momentum(top_n: int = 20):
+    """顯示動能排名"""
+    portfolio = load_portfolio()
+    positions = portfolio.get("positions", {})
+    held_symbols = list(positions.keys())
+
+    # 候選池
+    sp500 = get_sp500_tickers()[:100]
+    watchlist = load_watchlist()
+    wl_symbols = watchlist.get("symbols", [])
+    all_tickers = list(dict.fromkeys(sp500 + wl_symbols + held_symbols))
+
+    print_momentum_report(all_tickers, period=21, top_n=top_n)
+
+    # 標記持倉
+    print("  持倉標記: ", end="")
+    ranks = rank_by_momentum(all_tickers, period=21)
+    held_in_top = [r for r in ranks[:top_n] if r["symbol"] in positions]
+    if held_in_top:
+        for r in held_in_top:
+            print(f"{r['symbol']}(#{r['rank']}) ", end="")
+    else:
+        print("無持倉在前 {} 名".format(top_n), end="")
+    print()
 
 
 def run_snapshot(year: int = None):
@@ -310,11 +350,13 @@ def run_snapshot(year: int = None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="盤前建議系統")
+    parser = argparse.ArgumentParser(description="盤前建議系統（動能策略版）")
     parser.add_argument("--init", action="store_true", help="互動式建立初始投資組合")
     parser.add_argument("--watch", nargs="+", metavar="SYMBOL", help="新增白名單標的")
     parser.add_argument("--snapshot", nargs="?", const=date.today().year, type=int,
                         metavar="YEAR", help="建立年度快照（預設當年）")
+    parser.add_argument("--momentum", nargs="?", const=20, type=int,
+                        metavar="N", help="查看動能排名（預設前20名）")
     args = parser.parse_args()
 
     if args.init:
@@ -323,6 +365,8 @@ def main():
         run_watch(args.watch)
     elif args.snapshot:
         run_snapshot(args.snapshot)
+    elif args.momentum:
+        run_momentum(args.momentum)
     else:
         run_premarket()
 

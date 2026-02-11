@@ -125,3 +125,43 @@ def add_to_watchlist(symbols, path=WATCHLIST_PATH):
             wl["symbols"].append(s)
     save_watchlist(wl, path)
     return wl
+
+
+def update_high_prices(portfolio, current_prices):
+    """更新每個持倉的最高價記錄
+
+    Args:
+        portfolio: 持倉 dict
+        current_prices: {symbol: price}
+
+    Returns:
+        updated: bool，是否有更新
+    """
+    updated = False
+    for symbol, pos in portfolio.get("positions", {}).items():
+        price = current_prices.get(symbol)
+        if price is None:
+            continue
+
+        current_high = pos.get("high_since_entry", pos.get("avg_price", 0))
+
+        # 如果沒有 high_since_entry，用成本價初始化
+        if "high_since_entry" not in pos:
+            pos["high_since_entry"] = max(price, pos.get("avg_price", 0))
+            updated = True
+        elif price > current_high:
+            pos["high_since_entry"] = price
+            updated = True
+
+    return updated
+
+
+def initialize_high_prices(portfolio, current_prices):
+    """初始化所有持倉的最高價（首次使用時）
+
+    對於沒有 high_since_entry 的持倉，設為 max(current_price, avg_price)
+    """
+    for symbol, pos in portfolio.get("positions", {}).items():
+        if "high_since_entry" not in pos:
+            price = current_prices.get(symbol, pos.get("avg_price", 0))
+            pos["high_since_entry"] = max(price, pos.get("avg_price", 0))
