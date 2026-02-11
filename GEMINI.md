@@ -17,7 +17,7 @@ The core logic is written in Python and leverages several libraries:
 The system's workflow is centered around a daily cycle of pre-market analysis and post-market confirmation.
 
 - **Daily Workflow:**
-  1.  **Pre-market:** `premarket_main.py` runs to analyze existing positions and scan for new opportunities. It loads the current portfolio, fetches the latest prices, performs risk checks, scans for candidates based on technicals, analyzes news sentiment using AI, and finally outputs a set of recommended actions to a `data/actions_YYYYMMDD.json` file.
+  1.  **Pre-market:** `premarket_main.py` runs to analyze existing positions and scan for new opportunities. It loads the current portfolio, fetches the latest prices, performs risk checks, scans for candidates based on technicals, analyzes news sentiment using AI, outputs a set of recommended actions to a `data/actions_YYYYMMDD.json` file, and sends a formatted HTML email report.
   2.  **Post-market:** `confirm_main.py` is used to log which of the recommended actions were executed during the day, updating the master `data/portfolio.json`.
 
 - **Core Modules (`src/`):**
@@ -27,6 +27,7 @@ The system's workflow is centered around a daily cycle of pre-market analysis an
   - `data_loader.py`: Handles fetching stock data from `yfinance`, including a caching mechanism to avoid redundant downloads.
   - `strategy.py`: Defines the technical trading signals (e.g., Price > MA60 and RSI < 70).
   - `ai_analyst.py`: Fetches news headlines and uses the Gemini API to perform sentiment analysis, which gracefully degrades to a neutral score if API limits are reached.
+  - `notifier.py`: Formats and sends the daily pre-market analysis report via Gmail SMTP.
   - `backtester.py`: An engine for running historical backtests of the trading strategies.
   - `main.py`: The main entry point for running historical stress tests.
 
@@ -42,10 +43,21 @@ pip install -r requirements.txt
 
 ### 2. Configuration
 
-The system requires an API key for the Gemini model. Create a `.env` file in the root directory and add your key:
+The system is configured via a `.env` file in the root directory.
 
+- **`GEMINI_API_KEY`**: Your API key for the Google Gemini model, used for sentiment analysis.
+- **`EMAIL_ENABLED`**: Set to `true` to enable email notifications.
+- **`GMAIL_SENDER`**: The Gmail address from which the reports will be sent.
+- **`GMAIL_APP_PASSWORD`**: An "App Password" generated from your Google account for authentication. This is not your regular login password.
+- **`GMAIL_RECIPIENT`**: The email address that will receive the reports.
+
+Example `.env` file:
 ```
 GEMINI_API_KEY=<your_google_gemini_api_key>
+EMAIL_ENABLED=true
+GMAIL_SENDER=your_gmail@gmail.com
+GMAIL_APP_PASSWORD=your_gmail_app_password
+GMAIL_RECIPIENT=your_recipient_email@gmail.com
 ```
 
 ### 3. Running the Application
@@ -84,9 +96,10 @@ The project has several entry points for different tasks:
 ## Development Conventions
 
 - **No Formal Tests:** The project currently lacks a formal test suite, linter, or CI/CD pipeline.
-- **Strategy Logic:** The primary strategy is a dual-factor model combining a 60-day moving average (MA60) for trend and the Relative Strength Index (RSI) for momentum.
-  - **Buy Signal:** `Price > MA60` AND `RSI < 70`
-  - **Sell Signal:** `Price < MA60` OR `RSI > 85`
+- **Strategy Logic:** The current core strategy is momentum-based.
+  - **Candidate Pool:** The system scans the full S&P 500 list, plus a user-defined watchlist and existing holdings.
+  - **Entry Signal:** Recommends buying stocks that rank in the top 5 by momentum (based on the last 21 days of performance).
+  - **Exit Signals:** Uses a three-tiered exit system: a trailing stop-loss from the high, a break below the 200-day moving average (MA200), and a hard stop-loss based on the entry price.
 - **Data Caching:** Historical stock data fetched from `yfinance` is cached in the `data/` directory as CSV files to speed up subsequent runs.
 - **State Management:** The primary state of the portfolio is stored in `data/portfolio.json`. Daily action plans are stored in `data/actions_YYYYMMDD.json`.
 - **AI Graceful Degradation:** The AI sentiment analysis module is designed to handle API errors (e.g., rate limits, billing issues) by defaulting to a neutral sentiment score, allowing the rest of the system to function based on technicals alone.

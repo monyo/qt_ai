@@ -8,7 +8,7 @@
 |------|------|
 | **進場** | 動能排名前 5 名（過去 21 天報酬最高） |
 | **出場** | 只有硬停損 -35%（讓獲利奔跑） |
-| **候選池** | S&P 500 前 100 + 白名單 + 現有持倉 |
+| **候選池** | S&P 500 成分股 + 白名單 + 現有持倉 |
 
 ---
 
@@ -21,9 +21,15 @@ conda activate qt_env
 # 或使用 pip
 pip install -r requirements.txt
 
-# 設定 API Key（用於 AI 情緒分析）
-echo "GEMINI_API_KEY=your_key_here" > .env
+# 設定 API Key 與 Email
+touch .env
+echo "GEMINI_API_KEY=your_key_here" >> .env
+echo "EMAIL_ENABLED=true" >> .env
+echo "GMAIL_SENDER=your_gmail@gmail.com" >> .env
+echo "GMAIL_APP_PASSWORD=your_gmail_app_password" >> .env
+echo "GMAIL_RECIPIENT=your_recipient_email@gmail.com" >> .env
 ```
+> **注意**: `GMAIL_APP_PASSWORD` 需要在你的 Google 帳戶中產生「應用程式密碼」，而不是你的登入密碼。
 
 ---
 
@@ -51,6 +57,7 @@ python confirm_main.py 2026-02-05
 | **三層出場** | 移動停利 -15% / MA200 停損 / 極端停損 -35% |
 | **板塊監控** | 追蹤科技/軟體/半導體 vs 大盤，板塊走弱時警告 |
 | **曝險警告** | 當科技股佔比高 + 板塊走弱時特別提醒 |
+| **郵件通知** | 每日盤前自動發送 HTML 格式的分析報告 |
 | **持倉追蹤** | 記錄 avg_price、cost_basis、high_since_entry |
 | **年度 P&L** | 建立年度快照，追蹤年度績效 |
 
@@ -167,7 +174,7 @@ python -c "from src.sector_monitor import print_sector_report; print_sector_repo
 - **VOO 保護**：`core: true` 的持倉永遠只會 HOLD，不會建議賣出
 - **個股上限**：最多 30 檔（不含 VOO）
 - **硬停損**：跌破 -35%（以 avg_price 計算）時強制建議 EXIT
-- **掃描範圍**：S&P 500 前 50 檔 + 白名單
+- **掃描範圍**：完整的 S&P 500 + 白名單
 
 ---
 
@@ -175,7 +182,7 @@ python -c "from src.sector_monitor import print_sector_report; print_sector_repo
 
 ```
 ============================================================
-  盤前報告 2026-02-11  |  版本 0.3.0
+  盤前報告 2026-02-11  |  版本 0.4.0
 ============================================================
   投組總值: $  125,947.75
   現金:     $      155.00
@@ -189,13 +196,14 @@ python -c "from src.sector_monitor import print_sector_report; print_sector_repo
   🟢 半導體    +1.8% (vs SPY: +1.4%)
 
 --- HOLD (繼續持有) ---
-  [core] VOO    97 股 @ $636.44  P&L: +49.20%  動能: -0.3%
-         NVDA   10 股 @ $188.54  P&L: +80.04%  動能: +2.0%
-         UEC    1000 股 @ $16.34  P&L: +55.77%  動能: +10.7%
+  [core] VOO    97 股 @ $636.44  P&L: +49.20%  動能: -0.3%  1Y: +0% 🟢
+         NVDA   10 股 @ $188.54  P&L: +80.04%  動能: +2.0%  1Y: +26% 🟢
 
 --- ADD (建議買入) ---
-  [#1] BALL   建議 2 股 @ $67.76  動能: +21.8%
-         原因: 動能排名 #1（+21.8%）
-  [#2] CAT    建議 1 股 @ $742.37  動能: +20.5%
-         原因: 動能排名 #2（+20.5%）
+  [#1] GLW    建議 6 股 @ $128.10  動能: +50.3%  1Y vs SPY: +133% 🟢
+         原因: 動能排名 #1（+50.3%）
+  [#2] SNDK   建議 1 股 @ $541.64  動能: +43.5%  1Y vs SPY: +1389% 🟢
+         原因: 動能排名 #2（+43.5%）
+  [#5] CHTR   建議 3 股 @ $248.19  動能: +17.9%  1Y vs SPY: -45% 🔴
+         原因: 動能排名 #5（+17.9%）⚠️ 1年落後大盤 -45%
 ```
