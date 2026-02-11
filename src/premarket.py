@@ -4,8 +4,7 @@ from src.risk import check_all_exit_conditions, check_position_limit
 VERSION = "0.4.0"  # 三層出場策略版本
 
 
-def generate_actions(portfolio, current_prices, ma200_prices=None,
-                     momentum_ranks=None, sentiment_scores=None):
+def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None):
     """盤前決策引擎（動能策略 + 三層出場）
 
     Args:
@@ -13,7 +12,6 @@ def generate_actions(portfolio, current_prices, ma200_prices=None,
         current_prices: {symbol: price} 最新報價
         ma200_prices: {symbol: ma200_value} MA200 資料
         momentum_ranks: [{"symbol": str, "momentum": float, "rank": int}, ...]
-        sentiment_scores: {symbol: {"score": float, "reason": str}} (可選)
 
     Returns:
         actions: list of action dicts
@@ -22,8 +20,6 @@ def generate_actions(portfolio, current_prices, ma200_prices=None,
         ma200_prices = {}
     if momentum_ranks is None:
         momentum_ranks = []
-    if sentiment_scores is None:
-        sentiment_scores = {}
 
     actions = []
     action_id = 0
@@ -139,8 +135,6 @@ def generate_actions(portfolio, current_prices, ma200_prices=None,
             momentum = m["momentum"]
             rank = m["rank"]
             price = current_prices.get(symbol, 0)
-            sentiment = sentiment_scores.get(symbol, {})
-            sentiment_score = float(sentiment.get("score", 0.0))
 
             if price > 0 and position_size > 0:
                 suggested_shares = math.floor(position_size / price)
@@ -149,11 +143,6 @@ def generate_actions(portfolio, current_prices, ma200_prices=None,
 
             # 組裝原因
             reason = f"動能排名 #{rank}（+{momentum:.1f}%）"
-            if sentiment_score > 0.3:
-                reason += f" + AI 看多 ({sentiment_score:.1f})"
-            elif sentiment_score < -0.3:
-                reason += f" + AI 看空 ({sentiment_score:.1f})"
-
             if suggested_shares == 0:
                 reason += "（現金不足）"
 
@@ -167,7 +156,6 @@ def generate_actions(portfolio, current_prices, ma200_prices=None,
                 "momentum_rank": rank,
                 "reason": reason,
                 "source": "momentum",
-                "sentiment": sentiment_score,
                 "status": "pending",
             })
 

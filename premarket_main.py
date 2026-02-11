@@ -14,7 +14,6 @@ from src.portfolio import (
 from src.data_loader import get_sp500_tickers, fetch_current_prices
 from src.risk import check_position_limit
 from src.premarket import generate_actions, VERSION
-from src.ai_analyst import fetch_latest_news_yf, analyze_sentiment_batch_with_gemini
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
 from src.momentum import rank_by_momentum, print_momentum_report
@@ -151,35 +150,8 @@ def run_premarket():
         save_portfolio(portfolio)
         print("已更新持倉最高價記錄")
 
-    # 5. AI 情緒分析（動能前 5 名且未持有）
-    sentiment_scores = {}
-    new_buy_candidates = [
-        m for m in momentum_ranks[:10]
-        if m["momentum"] > 0 and m["symbol"] not in positions
-    ]
-
-    if new_buy_candidates:
-        top_for_ai = new_buy_candidates[:5]
-        symbol_to_headlines = {}
-        print(f"\n正在為動能前 {len(top_for_ai)} 名抓取新聞...")
-        for m in top_for_ai:
-            sym = m["symbol"]
-            try:
-                symbol_to_headlines[sym] = fetch_latest_news_yf(sym, lookback_hours=24, limit=5)
-            except Exception as e:
-                symbol_to_headlines[sym] = [f"新聞取得失敗: {e}"]
-
-        if symbol_to_headlines:
-            print(f"送交 Gemini 批次審核 {len(symbol_to_headlines)} 檔...")
-            ai_map = analyze_sentiment_batch_with_gemini(symbol_to_headlines)
-            for sym, result in ai_map.items():
-                sentiment_scores[sym] = {
-                    "score": float(result.get("score", 0.0)),
-                    "reason": result.get("reason", ""),
-                }
-
-    # 6. 產出 actions（使用動能排名 + 三層出場）
-    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, sentiment_scores)
+    # 5. 產出 actions（使用動能排名 + 三層出場）
+    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks)
 
     # 6. 計算投組總值
     total_value = portfolio.get("cash", 0)
@@ -273,9 +245,8 @@ def run_premarket():
     if adds:
         print("--- ADD (建議買入) ---")
         for a in adds:
-            sentiment_str = f"  情緒: {a.get('sentiment', 0):.1f}" if a.get("sentiment") else ""
             momentum_str = f"  動能: +{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
-            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']:<6} 建議 {a['suggested_shares']} 股 @ ${a.get('current_price', 0):.2f}{momentum_str}{sentiment_str}")
+            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']:<6} 建議 {a['suggested_shares']} 股 @ ${a.get('current_price', 0):.2f}{momentum_str}")
             print(f"         原因: {a['reason']}")
         print()
 
