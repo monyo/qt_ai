@@ -17,6 +17,7 @@ from src.premarket import generate_actions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
 from src.momentum import rank_by_momentum, print_momentum_report
+from src.notifier import GmailNotifier
 
 
 def fetch_ma200_prices(symbols):
@@ -250,7 +251,16 @@ def run_premarket():
             print(f"         原因: {a['reason']}")
         print()
 
-    print(f"Actions 已儲存至: {actions_path}")
+    # 9. 發送 Email 通知
+    notifier = GmailNotifier()
+    if notifier.is_configured():
+        print("正在發送 Email 通知...")
+        if notifier.send_premarket_report(actions_output):
+            print(f"Email 已發送至 {notifier.recipient}")
+        else:
+            print("Email 發送失敗，請檢查 .env 設定")
+
+    print(f"\nActions 已儲存至: {actions_path}")
     print(f"確認執行請執行: python confirm_main.py {date.today()}")
 
 

@@ -1,0 +1,218 @@
+"""Gmail SMTP 通知模組"""
+import smtplib
+import os
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class GmailNotifier:
+    """Gmail SMTP 郵件發送器"""
+
+    def __init__(self):
+        self.sender = os.getenv("GMAIL_SENDER", "")
+        self.password = os.getenv("GMAIL_APP_PASSWORD", "")
+        self.recipient = os.getenv("GMAIL_RECIPIENT", "")
+        self.enabled = os.getenv("EMAIL_ENABLED", "false").lower() == "true"
+
+    def is_configured(self):
+        """檢查是否已設定必要參數"""
+        return all([self.sender, self.password, self.recipient, self.enabled])
+
+    def send_premarket_report(self, actions_data):
+        """發送盤前報告
+
+        Args:
+            actions_data: actions JSON 資料（與儲存到檔案的格式相同）
+
+        Returns:
+            bool: 是否發送成功
+        """
+        if not self.is_configured():
+            return False
+
+        portfolio = actions_data.get("portfolio_snapshot", {})
+        total_value = portfolio.get("total_value", 0)
+
+        subject = f"盤前報告 {actions_data['date']} | 投組 ${total_value:,.0f}"
+        text_body = self._format_text_report(actions_data)
+        html_body = self._format_html_report(actions_data)
+
+        return self._send_email(subject, text_body, html_body)
+
+    def _format_text_report(self, data):
+        """產生純文字報告"""
+        portfolio = data.get("portfolio_snapshot", {})
+        sector = data.get("sector_status", {})
+        actions = data.get("actions", [])
+
+        lines = [
+            f"盤前報告 {data['date']}",
+            f"版本 {data.get('version', 'N/A')}",
+            "=" * 40,
+            "",
+            f"投組總值: ${portfolio.get('total_value', 0):,.2f}",
+            f"現金:     ${portfolio.get('cash', 0):,.2f}",
+            f"個股:     {portfolio.get('individual_count', 0)}/30 檔",
+        ]
+
+        # 年度 P&L
+        yearly = portfolio.get("yearly_pnl")
+        if yearly:
+            sign = "+" if yearly["pnl_amount"] >= 0 else ""
+            lines.append(f"年度 P&L: {sign}${yearly['pnl_amount']:,.2f} ({sign}{yearly['pnl_pct']:.1f}%)")
+
+        lines.append("")
+
+        # 板塊警告
+        if sector.get("alerts"):
+            lines.append("板塊警告:")
+            for alert in sector["alerts"]:
+                lines.append(f"  - {alert}")
+            lines.append("")
+
+        # 分類 actions
+        exits = [a for a in actions if a["action"] == "EXIT"]
+        holds = [a for a in actions if a["action"] == "HOLD"]
+        adds = [a for a in actions if a["action"] == "ADD"]
+
+        if exits:
+            lines.append(f"EXIT 建議 ({len(exits)} 檔):")
+            for a in exits:
+                pnl = f"{a.get('pnl_pct', 0):+.1f}%" if a.get("pnl_pct") is not None else "N/A"
+                lines.append(f"  {a['symbol']:<6} {a.get('shares', 0):>4} 股  {pnl:<8} {a.get('reason', '')}")
+            lines.append("")
+
+        if holds:
+            symbols = [a["symbol"] for a in holds]
+            lines.append(f"HOLD ({len(holds)} 檔): {', '.join(symbols)}")
+            lines.append("")
+
+        if adds:
+            lines.append(f"ADD 建議 ({len(adds)} 檔):")
+            for a in adds:
+                momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
+                rank = a.get("momentum_rank", "?")
+                lines.append(f"  #{rank} {a['symbol']:<6} {momentum}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def _format_html_report(self, data):
+        """產生 HTML 報告"""
+        portfolio = data.get("portfolio_snapshot", {})
+        sector = data.get("sector_status", {})
+        actions = data.get("actions", [])
+
+        # 年度 P&L
+        yearly_html = ""
+        yearly = portfolio.get("yearly_pnl")
+        if yearly:
+            sign = "+" if yearly["pnl_amount"] >= 0 else ""
+            color = "#28a745" if yearly["pnl_amount"] >= 0 else "#dc3545"
+            yearly_html = f'<tr><td>年度 P&L</td><td style="color:{color}">{sign}${yearly["pnl_amount"]:,.2f} ({sign}{yearly["pnl_pct"]:.1f}%)</td></tr>'
+
+        # 板塊警告
+        alerts_html = ""
+        if sector.get("alerts"):
+            alert_items = "".join(f"<li>{a}</li>" for a in sector["alerts"])
+            alerts_html = f'<div style="background:#fff3cd;padding:10px;border-radius:5px;margin:10px 0;"><strong>板塊警告</strong><ul style="margin:5px 0;">{alert_items}</ul></div>'
+
+        # Actions 表格
+        exits = [a for a in actions if a["action"] == "EXIT"]
+        holds = [a for a in actions if a["action"] == "HOLD"]
+        adds = [a for a in actions if a["action"] == "ADD"]
+
+        exits_html = ""
+        if exits:
+            rows = ""
+            for a in exits:
+                pnl = a.get("pnl_pct", 0)
+                pnl_color = "#28a745" if pnl and pnl >= 0 else "#dc3545"
+                pnl_str = f"{pnl:+.1f}%" if pnl is not None else "N/A"
+                rows += f'<tr><td>{a["symbol"]}</td><td>{a.get("shares", 0)} 股</td><td style="color:{pnl_color}">{pnl_str}</td><td>{a.get("reason", "")}</td></tr>'
+            exits_html = f'''
+            <h3 style="color:#dc3545;">EXIT 建議 ({len(exits)} 檔)</h3>
+            <table style="border-collapse:collapse;width:100%;">
+                <tr style="background:#f8f9fa;"><th style="text-align:left;padding:8px;">標的</th><th>股數</th><th>P&L</th><th>原因</th></tr>
+                {rows}
+            </table>'''
+
+        holds_html = ""
+        if holds:
+            symbols = ", ".join(a["symbol"] for a in holds)
+            holds_html = f'<h3 style="color:#6c757d;">HOLD ({len(holds)} 檔)</h3><p>{symbols}</p>'
+
+        adds_html = ""
+        if adds:
+            rows = ""
+            for a in adds:
+                momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
+                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td>{momentum}</td></tr>'
+            adds_html = f'''
+            <h3 style="color:#28a745;">ADD 建議 ({len(adds)} 檔)</h3>
+            <table style="border-collapse:collapse;width:100%;">
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">排名</th><th>標的</th><th>動能</th></tr>
+                {rows}
+            </table>'''
+
+        html = f'''
+        <html>
+        <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+            <h2>盤前報告 {data["date"]}</h2>
+            <p style="color:#6c757d;">版本 {data.get("version", "N/A")}</p>
+
+            <table style="border-collapse:collapse;width:100%;margin:20px 0;">
+                <tr><td style="padding:8px;border-bottom:1px solid #ddd;">投組總值</td><td style="padding:8px;border-bottom:1px solid #ddd;"><strong>${portfolio.get("total_value", 0):,.2f}</strong></td></tr>
+                <tr><td style="padding:8px;border-bottom:1px solid #ddd;">現金</td><td style="padding:8px;border-bottom:1px solid #ddd;">${portfolio.get("cash", 0):,.2f}</td></tr>
+                <tr><td style="padding:8px;border-bottom:1px solid #ddd;">個股</td><td style="padding:8px;border-bottom:1px solid #ddd;">{portfolio.get("individual_count", 0)}/30 檔</td></tr>
+                {yearly_html}
+            </table>
+
+            {alerts_html}
+            {exits_html}
+            {holds_html}
+            {adds_html}
+
+            <hr style="margin:30px 0;border:none;border-top:1px solid #ddd;">
+            <p style="color:#6c757d;font-size:12px;">此郵件由盤前建議系統自動發送</p>
+        </body>
+        </html>
+        '''
+        return html
+
+    def _send_email(self, subject, text_body, html_body=None):
+        """發送郵件
+
+        Args:
+            subject: 郵件主旨
+            text_body: 純文字內容
+            html_body: HTML 內容（可選）
+
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = self.sender
+            msg["To"] = self.recipient
+
+            msg.attach(MIMEText(text_body, "plain", "utf-8"))
+            if html_body:
+                msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(self.sender, self.password)
+                server.sendmail(self.sender, [self.recipient], msg.as_string())
+
+            return True
+
+        except smtplib.SMTPAuthenticationError:
+            print("郵件發送失敗: Gmail 認證錯誤，請檢查 App Password")
+            return False
+        except Exception as e:
+            print(f"郵件發送失敗: {e}")
+            return False
