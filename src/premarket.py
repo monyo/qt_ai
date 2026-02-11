@@ -115,16 +115,31 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             })
 
     # === 3. 新增買入候選（依動能排名） ===
-    available_slots = check_position_limit(portfolio)
-    if available_slots > 0 and momentum_ranks:
-        cash = portfolio.get("cash", 0)
-        position_size = cash / max(available_slots, 1) if cash > 0 else 0
+    # 計算預估可用現金（假設 EXIT 全部執行，取 85% 避免價差）
+    CASH_SAFETY_FACTOR = 0.85
+    exit_proceeds = sum(
+        current_prices.get(a["symbol"], 0) * a["shares"]
+        for a in actions if a["action"] == "EXIT"
+    )
+    exit_count = sum(1 for a in actions if a["action"] == "EXIT")
 
-        # 篩選：動能 > 0 + 尚未持有
+    current_cash = portfolio.get("cash", 0)
+    projected_cash = current_cash + exit_proceeds * CASH_SAFETY_FACTOR
+
+    # 可用槽位 = 原本空位 + EXIT 釋放的位置
+    base_slots = check_position_limit(portfolio)
+    available_slots = base_slots + exit_count
+
+    if available_slots > 0 and momentum_ranks:
+        position_size = projected_cash / max(available_slots, 1) if projected_cash > 0 else 0
+
+        # 篩選：動能 > 0 + 尚未持有 + 不在 EXIT 名單
+        exit_symbols = {a["symbol"] for a in actions if a["action"] == "EXIT"}
         buy_candidates = [
             m for m in momentum_ranks
             if m.get("momentum", 0) > 0
             and m["symbol"] not in positions
+            and m["symbol"] not in exit_symbols
         ]
         # 已經按動能排序，最多顯示 5 檔（避免資訊過載）
         max_add = min(5, available_slots)
