@@ -123,6 +123,29 @@ class GmailNotifier:
                 lines.append(f"     {a.get('reason', '')}")
                 lines.append("")
 
+        # 台股觀察
+        tw_stocks = data.get("tw_stocks", {})
+        if tw_stocks:
+            scan_count = tw_stocks.get("scan_count", 0)
+            lines.append(f"🇹🇼 台股觀察（{scan_count} 檔高流動性股）:")
+            leaders = tw_stocks.get("leaders", [])
+            if leaders:
+                lines.append("  動能領先:")
+                for t in leaders:
+                    alpha = t.get("alpha_1y")
+                    alpha_str = ""
+                    if alpha is not None:
+                        alpha_emoji = "🟢" if alpha > 0 else ("🟡" if alpha > -10 else "🔴")
+                        alpha_str = f"  1Y: {alpha:+.0f}% {alpha_emoji}"
+                    lines.append(f"    #{t['rank']} {t['symbol']} {t.get('name', '')} +{t['momentum']:.1f}%{alpha_str}")
+
+            laggards = tw_stocks.get("laggards", [])
+            if laggards:
+                lines.append("  動能落後:")
+                for t in laggards:
+                    lines.append(f"    #{t['rank']} {t['symbol']} {t.get('name', '')} {t['momentum']:.1f}%")
+            lines.append("")
+
         return "\n".join(lines)
 
     def _format_html_report(self, data):
@@ -226,6 +249,36 @@ class GmailNotifier:
                 {rows}
             </table>'''
 
+        # 台股觀察
+        tw_stocks = data.get("tw_stocks", {})
+        tw_stocks_html = ""
+        if tw_stocks:
+            leaders = tw_stocks.get("leaders", [])
+            laggards = tw_stocks.get("laggards", [])
+
+            leader_rows = ""
+            for t in leaders:
+                alpha = t.get("alpha_1y")
+                alpha_str = ""
+                if alpha is not None:
+                    alpha_emoji = "🟢" if alpha > 0 else ("🟡" if alpha > -10 else "🔴")
+                    alpha_str = f"{alpha_emoji} {alpha:+.0f}%"
+                leader_rows += f'<tr><td style="padding:4px;">#{t["rank"]}</td><td>{t["symbol"]}</td><td>{t.get("name", "")}</td><td style="color:#28a745;">+{t["momentum"]:.1f}%</td><td>{alpha_str}</td></tr>'
+
+            laggard_rows = ""
+            for t in laggards:
+                laggard_rows += f'<tr><td style="padding:4px;">#{t["rank"]}</td><td>{t["symbol"]}</td><td>{t.get("name", "")}</td><td style="color:#dc3545;">{t["momentum"]:.1f}%</td><td></td></tr>'
+
+            tw_stocks_html = f'''
+            <h3>🇹🇼 台股觀察（{tw_stocks.get("scan_count", 0)} 檔高流動性股）</h3>
+            <table style="border-collapse:collapse;width:100%;">
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">排名</th><th>代碼</th><th>名稱</th><th>動能</th><th>1Y vs 0050</th></tr>
+                <tr><td colspan="5" style="background:#d4edda;padding:4px;"><strong>動能領先</strong></td></tr>
+                {leader_rows}
+                <tr><td colspan="5" style="background:#f8d7da;padding:4px;"><strong>動能落後</strong></td></tr>
+                {laggard_rows}
+            </table>'''
+
         html = f'''
         <html>
         <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
@@ -244,6 +297,7 @@ class GmailNotifier:
             {holds_html}
             {adds_html}
             {rotates_html}
+            {tw_stocks_html}
 
             <hr style="margin:30px 0;border:none;border-top:1px solid #ddd;">
             <p style="color:#6c757d;font-size:12px;">此郵件由盤前建議系統自動發送</p>

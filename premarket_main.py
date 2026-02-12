@@ -11,7 +11,8 @@ from src.portfolio import (
     load_watchlist, save_watchlist, add_to_watchlist,
     update_high_prices, initialize_high_prices,
 )
-from src.data_loader import get_sp500_tickers, fetch_current_prices
+from src.data_loader import get_sp500_tickers, fetch_current_prices, get_tw50_tickers, TW_STOCK_NAMES
+from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
 from src.risk import check_position_limit
 from src.premarket import generate_actions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
@@ -100,8 +101,12 @@ def run_init():
     print(f"已儲存至 data/portfolio.json")
 
 
-def run_premarket():
-    """產出盤前建議（動能策略 + 三層出場）"""
+def run_premarket(scan_tw=False):
+    """產出盤前建議（動能策略 + 三層出場）
+
+    Args:
+        scan_tw: 是否掃描台股（預設 False）
+    """
     os.makedirs("data", exist_ok=True)
     today_str = date.today().strftime("%Y%m%d")
 
@@ -252,7 +257,8 @@ def run_premarket():
             else:
                 alpha_str = ""
             tag = "[core]" if a["source"] == "core_hold" else "      "
-            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {pnl}  {momentum}{alpha_str}")
+            price = a.get('current_price') or 0
+            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}")
         print()
 
     if adds:
@@ -285,6 +291,63 @@ def run_premarket():
             print(f"  → 買 {a['buy_symbol']:<6} {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
             print(f"       動能差: +{a['momentum_diff']:.0f}%  {a['reason']}")
             print()
+
+    # === 台股觀察（全市場掃描，需加 --tw 開啟）===
+    if scan_tw:
+        print("正在載入高流動性台股清單...")
+        tw_liquid = scan_tw_market(min_volume=1000)  # 使用快取，日均量 > 1000 張
+        tw_symbols = [s["symbol"] for s in tw_liquid]
+        tw_name_map = {s["symbol"]: s["name"] for s in tw_liquid}
+
+        print(f"正在計算 {len(tw_symbols)} 檔台股動能...")
+        tw_momentum = rank_by_momentum(tw_symbols, period=21)
+
+        # 計算台股 1Y Alpha（vs 0050）
+        tw_alpha_symbols = [m["symbol"] for m in tw_momentum[:10]]
+        from src.momentum import calculate_alpha_1y
+        tw_alpha_map = {}
+        for sym in tw_alpha_symbols:
+            alpha = calculate_alpha_1y(sym, benchmark="0050.TW")
+            if alpha is not None:
+                tw_alpha_map[sym] = alpha
+
+        # 顯示台股建議（前10名 ADD、後5名觀察）
+        tw_adds = [m for m in tw_momentum if m.get("momentum", 0) > 5][:10]
+        tw_weak = [m for m in tw_momentum if m.get("momentum", 0) < 0][-5:]
+
+        print()
+        print(f"--- 🇹🇼 台股觀察（{len(tw_symbols)} 檔高流動性股）---")
+        if tw_adds:
+            print("  動能領先（建議觀察）:")
+            for m in tw_adds:
+                name = tw_name_map.get(m["symbol"], "")
+                alpha = tw_alpha_map.get(m["symbol"])
+                alpha_str = ""
+                if alpha is not None:
+                    alpha_emoji = "🟢" if alpha > 0 else ("🟡" if alpha > -10 else "🔴")
+                    alpha_str = f"  1Y vs 0050: {alpha:+.0f}% {alpha_emoji}"
+                print(f"    #{m['rank']:<3} {m['symbol']:<10} {name:<8} 動能: +{m['momentum']:.1f}%{alpha_str}")
+
+        if tw_weak:
+            print("  動能落後（注意風險）:")
+            for m in tw_weak:
+                name = tw_name_map.get(m["symbol"], "")
+                print(f"    #{m['rank']:<3} {m['symbol']:<10} {name:<8} 動能: {m['momentum']:.1f}%")
+        print()
+
+        # 將台股資訊加入 actions_output
+        actions_output["tw_stocks"] = {
+            "scan_count": len(tw_symbols),
+            "leaders": [{"symbol": m["symbol"], "name": tw_name_map.get(m["symbol"], ""),
+                         "momentum": m["momentum"], "rank": m["rank"],
+                         "alpha_1y": tw_alpha_map.get(m["symbol"])} for m in tw_adds],
+            "laggards": [{"symbol": m["symbol"], "name": tw_name_map.get(m["symbol"], ""),
+                          "momentum": m["momentum"], "rank": m["rank"]} for m in tw_weak],
+        }
+
+        # 重新儲存（含台股）
+        with open(actions_path, "w", encoding="utf-8") as f:
+            json.dump(actions_output, f, indent=2, ensure_ascii=False)
 
     # 9. 發送 Email 通知
     notifier = GmailNotifier()
@@ -373,6 +436,7 @@ def main():
                         metavar="YEAR", help="建立年度快照（預設當年）")
     parser.add_argument("--momentum", nargs="?", const=20, type=int,
                         metavar="N", help="查看動能排名（預設前20名）")
+    parser.add_argument("--tw", action="store_true", help="掃描台股（預設關閉）")
     args = parser.parse_args()
 
     if args.init:
@@ -384,7 +448,7 @@ def main():
     elif args.momentum:
         run_momentum(args.momentum)
     else:
-        run_premarket()
+        run_premarket(scan_tw=args.tw)
 
 
 if __name__ == "__main__":
