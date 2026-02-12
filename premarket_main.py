@@ -269,6 +269,23 @@ def run_premarket():
             print(f"         原因: {a['reason']}")
         print()
 
+    # ROTATE 建議（汰弱留強）
+    rotates = [a for a in actions if a["action"] == "ROTATE"]
+    if rotates:
+        print("--- ROTATE (汰弱留強) ---")
+        for a in rotates:
+            sell_pnl = f"{a['sell_pnl_pct']:+.1f}%" if a.get("sell_pnl_pct") is not None else "N/A"
+            buy_alpha = a.get('buy_alpha_1y')
+            if buy_alpha is not None:
+                alpha_emoji = "🟢" if buy_alpha > 0 else ("🟡" if buy_alpha > -20 else "🔴")
+                alpha_str = f"1Y: {buy_alpha:+.0f}% {alpha_emoji}"
+            else:
+                alpha_str = ""
+            print(f"  賣 {a['sell_symbol']:<6} {a['sell_shares']} 股 (動能: {a['sell_momentum']:+.1f}%, P&L: {sell_pnl})")
+            print(f"  → 買 {a['buy_symbol']:<6} {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
+            print(f"       動能差: +{a['momentum_diff']:.0f}%  {a['reason']}")
+            print()
+
     # 9. 發送 Email 通知
     notifier = GmailNotifier()
     if notifier.is_configured():

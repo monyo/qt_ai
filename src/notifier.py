@@ -107,6 +107,22 @@ class GmailNotifier:
                 lines.append(f"  #{rank} {a['symbol']:<6} 建議 {shares} 股 @ ${a.get('current_price', 0):.2f}  {momentum}{alpha_str}")
             lines.append("")
 
+        # ROTATE 建議（汰弱留強）
+        rotates = [a for a in actions if a["action"] == "ROTATE"]
+        if rotates:
+            lines.append(f"ROTATE 建議（汰弱留強）({len(rotates)} 組):")
+            for a in rotates:
+                sell_pnl = f"{a.get('sell_pnl_pct', 0):+.1f}%" if a.get("sell_pnl_pct") is not None else "N/A"
+                buy_alpha = a.get("buy_alpha_1y")
+                alpha_str = ""
+                if buy_alpha is not None:
+                    alpha_emoji = "🟢" if buy_alpha > 0 else ("🟡" if buy_alpha > -20 else "🔴")
+                    alpha_str = f"1Y: {buy_alpha:+.0f}% {alpha_emoji}"
+                lines.append(f"  賣 {a['sell_symbol']:<6} {a['sell_shares']} 股 (動能: {a['sell_momentum']:+.1f}%, P&L: {sell_pnl})")
+                lines.append(f"  → 買 {a['buy_symbol']:<6} {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
+                lines.append(f"     {a.get('reason', '')}")
+                lines.append("")
+
         return "\n".join(lines)
 
     def _format_html_report(self, data):
@@ -168,12 +184,45 @@ class GmailNotifier:
                 if alpha_1y is not None:
                     alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
                     alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>"
-                
+
                 rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td>{shares} 股</td><td>${price:.2f}</td><td>{momentum}</td>{alpha_html}</tr>'
             adds_html = f'''
             <h3 style="color:#28a745;">ADD 建議 ({len(adds)} 檔)</h3>
             <table style="border-collapse:collapse;width:100%;">
                 <tr style="background:#f8f9fa;"><th style="padding:8px;">排名</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>1Y vs SPY</th></tr>
+                {rows}
+            </table>'''
+
+        # ROTATE 建議（汰弱留強）
+        rotates = [a for a in actions if a["action"] == "ROTATE"]
+        rotates_html = ""
+        if rotates:
+            rows = ""
+            for a in rotates:
+                sell_pnl = a.get("sell_pnl_pct", 0)
+                sell_pnl_color = "#28a745" if sell_pnl and sell_pnl >= 0 else "#dc3545"
+                sell_pnl_str = f"{sell_pnl:+.1f}%" if sell_pnl is not None else "N/A"
+
+                buy_alpha = a.get("buy_alpha_1y")
+                alpha_str = ""
+                if buy_alpha is not None:
+                    alpha_emoji = "🟢" if buy_alpha > 0 else ("🟡" if buy_alpha > -20 else "🔴")
+                    alpha_str = f"{alpha_emoji} {buy_alpha:+.0f}%"
+
+                rows += f'''<tr style="border-bottom:1px solid #ddd;">
+                    <td style="padding:8px;color:#dc3545;">賣 {a["sell_symbol"]}</td>
+                    <td>{a["sell_shares"]} 股</td>
+                    <td>{a["sell_momentum"]:+.1f}%</td>
+                    <td style="color:{sell_pnl_color}">{sell_pnl_str}</td>
+                    <td style="color:#28a745;">→ 買 {a["buy_symbol"]}</td>
+                    <td>{a["buy_shares"]} 股</td>
+                    <td>+{a["buy_momentum"]:.1f}%</td>
+                    <td>{alpha_str}</td>
+                </tr>'''
+            rotates_html = f'''
+            <h3 style="color:#fd7e14;">ROTATE 建議（汰弱留強）({len(rotates)} 組)</h3>
+            <table style="border-collapse:collapse;width:100%;">
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">賣出</th><th>股數</th><th>動能</th><th>P&L</th><th>買入</th><th>股數</th><th>動能</th><th>1Y</th></tr>
                 {rows}
             </table>'''
 
@@ -194,6 +243,7 @@ class GmailNotifier:
             {exits_html}
             {holds_html}
             {adds_html}
+            {rotates_html}
 
             <hr style="margin:30px 0;border:none;border-top:1px solid #ddd;">
             <p style="color:#6c757d;font-size:12px;">此郵件由盤前建議系統自動發送</p>
