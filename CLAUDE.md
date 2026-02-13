@@ -65,9 +65,9 @@ Quantitative stock scanning + position management system. Combines technical ana
 
 | Module | Role |
 |---|---|
-| `portfolio.py` | 持倉狀態管理。讀寫 `data/portfolio.json`（含 avg_price, cost_basis, transactions），白名單 `data/watchlist.json` |
-| `risk.py` | 風控：硬停損 -35%（以 avg_price 計），持倉上限 30 檔 |
-| `premarket.py` | 決策引擎。產出 HOLD/EXIT/ADD actions，含 source 和 version 欄位 |
+| `portfolio.py` | 持倉狀態管理。讀寫 `data/portfolio.json`（含 avg_price, cost_basis, transactions, favorite），白名單 `data/watchlist.json` |
+| `risk.py` | 風控：Fixed -15% 停損、MA200 停損、極端停損 -35%，持倉上限 30 檔 |
+| `premarket.py` | 決策引擎。產出 HOLD/EXIT/ADD/ROTATE actions，含 source 和 version 欄位 |
 | `data_loader.py` | yfinance 資料取得（含快取）、S&P 500 ticker 列表、批次最新報價 |
 | `strategy.py` | 技術訊號：buy when Price > MA60 AND RSI < 70, sell when Price < MA60 OR RSI > 85 |
 | `backtester.py` | 回測引擎。Signal → Position 狀態機，計算 Return%, MDD%, WinRate% |
@@ -80,9 +80,18 @@ Quantitative stock scanning + position management system. Combines technical ana
 ### Key design details
 
 - **Actions 狀態流**：`pending` → `confirmed`/`skipped`，HOLD 為 `auto`
-- **EXIT 優先序**：硬停損（-35%，無條件）> 策略賣出（技術面，可跳過）
-- **VOO 保護**：core=true 持倉永遠只產出 HOLD
-- **候選池**：S&P 500 前 50 + `data/watchlist.json` 白名單，白名單也走完整分析流程
+- **停損機制**（回測驗證 Fixed 優於 Trailing）：
+  - Fixed -15%：從成本價計算，跌破即出場
+  - MA200 停損：跌破 200 日均線
+  - 極端停損 -35%：最後防線
+- **持倉保護層級**：
+  - `core=true`：核心持倉（如 VOO），永遠只產出 HOLD
+  - `favorite=true`：偏愛標的（如 TSLA, NVDA），不參與 ROTATE 換股
+- **ROTATE 汰弱留強**：
+  - 觸發條件：動能差距 >10% 且持有 >30 天
+  - 主動建議換股，不限於現金不足時
+  - 排除 core 和 favorite 標的
+- **候選池**：S&P 500 前 100 + `data/watchlist.json` 白名單
 - **Sizing**：等權重 cash / available_slots
 - **報價定義**：前一交易日收盤價（盤前 yfinance 最後一筆 Close）
 - Signal 是事件（1/-1/0），backtester 轉為 Position（0/1）狀態機
