@@ -70,6 +70,7 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
                     "avg_price": price,
                     "cost_basis": cost_basis,
                     "first_entry": tx_date,
+                    "high_since_entry": price,  # 初始化最高價為買入價
                     "core": False,
                 }
 
