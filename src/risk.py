@@ -26,16 +26,23 @@ def check_stop_loss(positions, current_prices, threshold=-0.35):
     return triggered
 
 
-def check_trailing_stop(positions, current_prices, threshold=-0.15):
-    """檢查持倉是否觸發移動停利（從最高價計算）
+def check_trailing_stop(positions, current_prices, threshold=-0.15, max_loss_threshold=-0.05):
+    """檢查持倉是否觸發移動停利或保本停損
+
+    結合兩種停損機制：
+    1. 移動停利：從最高價回撤 15%
+    2. 保本停損：從成本價最多虧損 5%
+
+    取兩者較高的停損價，確保獲利不會變虧損。
 
     Args:
         positions: 持倉 dict（需含 high_since_entry 欄位）
         current_prices: {symbol: price}
         threshold: 回撤閾值（預設 -15%）
+        max_loss_threshold: 保本停損閾值（預設 -5%）
 
     Returns:
-        list of dict: [{"symbol": str, "drawdown_pct": float, "high_price": float}, ...]
+        list of dict: [{"symbol": str, "drawdown_pct": float, "high_price": float, "stop_type": str}, ...]
     """
     triggered = []
     for symbol, pos in positions.items():
@@ -43,17 +50,40 @@ def check_trailing_stop(positions, current_prices, threshold=-0.15):
             continue
         price = current_prices.get(symbol)
         high_price = pos.get("high_since_entry")
-        if price is None or high_price is None:
+        avg_price = pos.get("avg_price", 0)
+        if price is None or high_price is None or avg_price <= 0:
             continue
 
-        drawdown_pct = (price - high_price) / high_price
-        if drawdown_pct <= threshold:
+        # 計算兩種停損價
+        trailing_stop = high_price * (1 + threshold)      # 移動停利
+        breakeven_stop = avg_price * (1 + max_loss_threshold)  # 保本停損
+
+        # 取較高者作為實際停損價
+        stop_price = max(trailing_stop, breakeven_stop)
+
+        if price <= stop_price:
+            # 判斷是哪種停損觸發
+            if breakeven_stop >= trailing_stop:
+                stop_type = "breakeven"
+                drawdown_pct = (price - avg_price) / avg_price
+                reason_detail = f"保本停損（成本 ${avg_price:.2f}，停損價 ${breakeven_stop:.2f}）"
+            else:
+                stop_type = "trailing"
+                drawdown_pct = (price - high_price) / high_price
+                reason_detail = f"移動停利（高點 ${high_price:.2f}，停損價 ${trailing_stop:.2f}）"
+
             triggered.append({
                 "symbol": symbol,
                 "drawdown_pct": round(drawdown_pct * 100, 2),
                 "high_price": high_price,
                 "current_price": price,
+                "avg_price": avg_price,
+                "trailing_stop": round(trailing_stop, 2),
+                "breakeven_stop": round(breakeven_stop, 2),
+                "stop_price": round(stop_price, 2),
+                "stop_type": stop_type,
                 "reason": "trailing_stop",
+                "reason_detail": reason_detail,
             })
     return triggered
 
@@ -90,11 +120,12 @@ def check_ma200_stop(positions, current_prices, ma200_prices):
 
 
 def check_all_exit_conditions(positions, current_prices, ma200_prices,
-                               trailing_threshold=-0.15, hard_threshold=-0.35):
+                               trailing_threshold=-0.15, hard_threshold=-0.35,
+                               max_loss_threshold=-0.05):
     """檢查所有出場條件，回傳需要出場的持倉
 
     優先順序：
-    1. 移動停利（-15% from high）
+    1. 移動停利 / 保本停損（-15% from high 或 -5% from cost，取較高者）
     2. MA200 停損
     3. 極端停損（-35% from cost）
 
@@ -103,12 +134,18 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
     """
     exits = {}
 
-    # 1. 移動停利
-    trailing_stops = check_trailing_stop(positions, current_prices, trailing_threshold)
+    # 1. 移動停利 / 保本停損
+    trailing_stops = check_trailing_stop(positions, current_prices, trailing_threshold, max_loss_threshold)
     for item in trailing_stops:
+        # 根據 stop_type 顯示不同訊息
+        if item.get("stop_type") == "breakeven":
+            message = f"保本停損觸發（成本 ${item['avg_price']:.2f}，目前 {item['drawdown_pct']:.1f}%）"
+        else:
+            message = f"移動停利觸發（從高點 ${item['high_price']:.2f} 回撤 {item['drawdown_pct']:.1f}%）"
+
         exits[item["symbol"]] = {
             "reason": "trailing_stop",
-            "message": f"移動停利觸發（從高點 ${item['high_price']:.2f} 回撤 {item['drawdown_pct']:.1f}%）",
+            "message": message,
             "details": item,
         }
 

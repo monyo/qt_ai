@@ -89,3 +89,13 @@ Quantitative stock scanning + position management system. Combines technical ana
 - AI 情緒在 API 額度用完時降級為中性 (0.0)
 - **板塊監控**：盤前報告顯示科技/軟體/半導體 vs SPY 相對強弱，當板塊跑輸 >5% 時警告
 - **曝險警告**：當持股科技比例高 + 科技板塊走弱時，會特別提醒
+
+## Portfolio Baseline (2026)
+
+| 日期 | 事件 | 數值 |
+|------|------|------|
+| 2026-01-01 | 年初基準值 | $126,970.93 |
+| 2026-02-13 | Firstrade 實際值 | $125,150 |
+| 2026-02-13 | YTD P&L | -$1,821 (-1.43%) |
+
+**注意**：投組總值以 Firstrade 實際數字為準，yfinance 報價可能有微小差異。

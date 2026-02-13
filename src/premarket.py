@@ -2,7 +2,7 @@ import math
 from datetime import date
 from src.risk import check_all_exit_conditions, check_position_limit
 
-VERSION = "0.5.1"  # 汰弱留強 + 60天保護期
+VERSION = "0.5.2"  # 保本停損機制（-5% from cost）
 
 # 汰弱留強參數
 ROTATE_MOMENTUM_DIFF = 20      # 動能差距門檻 (%)
