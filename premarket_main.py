@@ -157,7 +157,8 @@ def run_premarket(scan_tw=False):
         print("已更新持倉最高價記錄")
 
     # 4.7 計算 1 年超額報酬（ADD 候選 + 持倉，用於長期績效參考）
-    add_candidates = [m["symbol"] for m in momentum_ranks[:10] if m["symbol"] not in positions]
+    # 取前 20 名確保涵蓋所有可能的 ADD 建議（前 10 名可能已持有）
+    add_candidates = [m["symbol"] for m in momentum_ranks[:20] if m["symbol"] not in positions]
     alpha_symbols = list(set(add_candidates + held_symbols))
     print(f"正在計算 {len(alpha_symbols)} 檔標的的 1 年超額報酬...")
     alpha_1y_map = calculate_alpha_batch(alpha_symbols)
