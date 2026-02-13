@@ -97,6 +97,14 @@ class GmailNotifier:
                 rank = a.get("momentum_rank", "?")
                 shares = a.get("suggested_shares", 0)
 
+                # Format RSI warning
+                rsi_str = ""
+                rsi = a.get("rsi")
+                if rsi is not None and rsi > 80:
+                    rsi_str = f"  🔴 RSI {rsi:.0f}"
+                elif rsi is not None and rsi > 75:
+                    rsi_str = f"  🟡 RSI {rsi:.0f}"
+
                 # Format alpha_1y
                 alpha_str = ""
                 alpha_1y = a.get("alpha_1y")
@@ -104,7 +112,7 @@ class GmailNotifier:
                     alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
                     alpha_str = f"  1Y: {alpha_1y:+.0f}% {alpha_emoji}"
 
-                lines.append(f"  #{rank} {a['symbol']:<6} 建議 {shares} 股 @ ${a.get('current_price', 0):.2f}  {momentum}{alpha_str}")
+                lines.append(f"  #{rank} {a['symbol']:<6} 建議 {shares} 股 @ ${a.get('current_price', 0):.2f}  {momentum}{rsi_str}{alpha_str}")
             lines.append("")
 
         # ROTATE 建議（汰弱留強）
@@ -201,6 +209,16 @@ class GmailNotifier:
                 shares = a.get("suggested_shares", 0)
                 price = a.get("current_price", 0)
 
+                # Format RSI warning for HTML
+                rsi_html = "<td></td>"
+                rsi = a.get("rsi")
+                if rsi is not None and rsi > 80:
+                    rsi_html = f'<td style="color:#dc3545;">🔴 {rsi:.0f}</td>'
+                elif rsi is not None and rsi > 75:
+                    rsi_html = f'<td style="color:#fd7e14;">🟡 {rsi:.0f}</td>'
+                elif rsi is not None:
+                    rsi_html = f'<td style="color:#28a745;">{rsi:.0f}</td>'
+
                 # Format alpha_1y for HTML
                 alpha_html = "<td></td>"
                 alpha_1y = a.get("alpha_1y")
@@ -208,11 +226,11 @@ class GmailNotifier:
                     alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
                     alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>"
 
-                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td>{shares} 股</td><td>${price:.2f}</td><td>{momentum}</td>{alpha_html}</tr>'
+                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td>{shares} 股</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
             adds_html = f'''
             <h3 style="color:#28a745;">ADD 建議 ({len(adds)} 檔)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;">排名</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>1Y vs SPY</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">排名</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th></tr>
                 {rows}
             </table>'''
 
