@@ -91,7 +91,7 @@ Quantitative stock scanning + position management system. Combines technical ana
   - 觸發條件：動能差距 >10% 且持有 >30 天
   - 主動建議換股，不限於現金不足時
   - 排除 core 和 favorite 標的
-- **RSI 過濾**：RSI > 80 不進場（極度超買），RSI > 75 顯示警告
+- **RSI 警告**：🔴 RSI > 80 極度超買、🟡 RSI > 75 超買（只警告不過濾，讓使用者決定）
 - **候選池**：S&P 500 前 100 + `data/watchlist.json` 白名單
 - **Sizing**：等權重 cash / available_slots
 - **報價定義**：前一交易日收盤價（盤前 yfinance 最後一筆 Close）
