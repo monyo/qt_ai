@@ -2,7 +2,7 @@ import math
 from datetime import date
 from src.risk import check_all_exit_conditions, check_position_limit
 
-VERSION = "0.7.1"  # RSI 過濾：超買不進場
+VERSION = "0.7.2"  # RSI 只警告不過濾（回測顯示飆股超買仍可續漲）
 
 # 汰弱留強參數（參考學術研究的定期重新排名邏輯）
 ROTATE_MOMENTUM_DIFF = 10      # 動能差距門檻 (%)，從 20% 降至 10%
@@ -144,19 +144,18 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
     base_slots = check_position_limit(portfolio)
     available_slots = base_slots + exit_count
 
-    # RSI 過濾參數
-    RSI_OVERBOUGHT = 75  # RSI > 75 視為超買，發出警告
-    RSI_EXTREME = 80     # RSI > 80 極度超買，不建議進場
+    # RSI 警告參數（回測顯示飆股超買後仍可續漲，故只警告不過濾）
+    RSI_OVERBOUGHT = 75  # RSI > 75 超買警告
+    RSI_EXTREME = 80     # RSI > 80 極度超買警告
 
     if available_slots > 0 and momentum_ranks:
-        # 篩選：動能 > 0 + 尚未持有 + 不在 EXIT 名單 + RSI 不要太高
+        # 篩選：動能 > 0 + 尚未持有 + 不在 EXIT 名單
         exit_symbols = {a["symbol"] for a in actions if a["action"] == "EXIT"}
         buy_candidates = [
             m for m in momentum_ranks
             if m.get("momentum", 0) > 0
             and m["symbol"] not in positions
             and m["symbol"] not in exit_symbols
-            and (m.get("rsi") is None or m.get("rsi", 0) < RSI_EXTREME)  # 極度超買不選
         ]
 
         # 策略 B: 集中火力
@@ -188,8 +187,10 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             reason = f"動能排名 #{rank}（+{momentum:.1f}%）"
             if suggested_shares == 0:
                 reason += "（現金不足）"
-            if rsi is not None and rsi > RSI_OVERBOUGHT:
-                reason += f" ⚠️ RSI {rsi:.0f} 超買"
+            if rsi is not None and rsi > RSI_EXTREME:
+                reason += f" 🔴 RSI {rsi:.0f} 極度超買"
+            elif rsi is not None and rsi > RSI_OVERBOUGHT:
+                reason += f" 🟡 RSI {rsi:.0f} 超買"
             if alpha_1y is not None and alpha_1y < -20:
                 reason += f" ⚠️ 1年落後大盤 {alpha_1y:.0f}%"
 
