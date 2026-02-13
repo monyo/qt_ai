@@ -2,7 +2,7 @@ import math
 from datetime import date
 from src.risk import check_all_exit_conditions, check_position_limit
 
-VERSION = "0.7.0"  # 主動汰弱留強 + favorite 保護
+VERSION = "0.7.1"  # RSI 過濾：超買不進場
 
 # 汰弱留強參數（參考學術研究的定期重新排名邏輯）
 ROTATE_MOMENTUM_DIFF = 10      # 動能差距門檻 (%)，從 20% 降至 10%
@@ -144,14 +144,19 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
     base_slots = check_position_limit(portfolio)
     available_slots = base_slots + exit_count
 
+    # RSI 過濾參數
+    RSI_OVERBOUGHT = 75  # RSI > 75 視為超買，發出警告
+    RSI_EXTREME = 80     # RSI > 80 極度超買，不建議進場
+
     if available_slots > 0 and momentum_ranks:
-        # 篩選：動能 > 0 + 尚未持有 + 不在 EXIT 名單
+        # 篩選：動能 > 0 + 尚未持有 + 不在 EXIT 名單 + RSI 不要太高
         exit_symbols = {a["symbol"] for a in actions if a["action"] == "EXIT"}
         buy_candidates = [
             m for m in momentum_ranks
             if m.get("momentum", 0) > 0
             and m["symbol"] not in positions
             and m["symbol"] not in exit_symbols
+            and (m.get("rsi") is None or m.get("rsi", 0) < RSI_EXTREME)  # 極度超買不選
         ]
 
         # 策略 B: 集中火力
@@ -169,6 +174,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             action_id += 1
             symbol = m["symbol"]
             momentum = m["momentum"]
+            rsi = m.get("rsi")
             rank = m["rank"]
             price = current_prices.get(symbol, 0)
             alpha_1y = alpha_1y_map.get(symbol)
@@ -178,12 +184,14 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             else:
                 suggested_shares = 0
 
-            # 組裝原因（加入長期表現警示）
+            # 組裝原因（加入警示）
             reason = f"動能排名 #{rank}（+{momentum:.1f}%）"
             if suggested_shares == 0:
                 reason += "（現金不足）"
+            if rsi is not None and rsi > RSI_OVERBOUGHT:
+                reason += f" ⚠️ RSI {rsi:.0f} 超買"
             if alpha_1y is not None and alpha_1y < -20:
-                reason += f"⚠️ 1年落後大盤 {alpha_1y:.0f}%"
+                reason += f" ⚠️ 1年落後大盤 {alpha_1y:.0f}%"
 
             actions.append({
                 "id": action_id,
@@ -192,6 +200,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "suggested_shares": suggested_shares,
                 "current_price": price,
                 "momentum": momentum,
+                "rsi": rsi,
                 "momentum_rank": rank,
                 "alpha_1y": alpha_1y,
                 "reason": reason,
