@@ -2,7 +2,7 @@ import math
 from datetime import date
 from src.risk import check_all_exit_conditions, check_position_limit
 
-VERSION = "0.5.2"  # 保本停損機制（-5% from cost）
+VERSION = "0.6.0"  # Fixed -15% 停損（回測驗證優於 Trailing）
 
 # 汰弱留強參數
 ROTATE_MOMENTUM_DIFF = 20      # 動能差距門檻 (%)
@@ -36,13 +36,13 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
     # 建立動能查詢表
     momentum_map = {m["symbol"]: m for m in momentum_ranks}
 
-    # === 1. 三層出場條件檢查 ===
-    # 1. 移動停利（-15% from high）
+    # === 1. 出場條件檢查 ===
+    # 1. 固定停損（-15% from cost）
     # 2. MA200 停損
-    # 3. 極端停損（-35% from cost）
+    # 3. 極端停損（-35% from cost，備用）
     exit_signals = check_all_exit_conditions(
         positions, current_prices, ma200_prices,
-        trailing_threshold=-0.15, hard_threshold=-0.35
+        fixed_threshold=-0.15, hard_threshold=-0.35
     )
 
     # === 2. 遍歷所有持倉，產出 HOLD / EXIT ===
