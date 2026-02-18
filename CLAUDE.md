@@ -92,6 +92,11 @@ Quantitative stock scanning + position management system. Combines technical ana
   - 主動建議換股，不限於現金不足時
   - 排除 core 和 favorite 標的
 - **RSI 警告**：🔴 RSI > 80 極度超買、🟡 RSI > 75 超買（只警告不過濾，讓使用者決定）
+- **趨勢狀態**（回測驗證月差 +2.14%）：
+  - ↗️ 轉強：40 日低點反彈 >20% 且距高點 <5%（V 轉格局）
+  - ↘️ 轉弱：距 40 日高點 >15%（倒 V 格局）
+  - → 盤整：其他
+  - 特殊警告：動能正 + 轉弱 = ⚠️ 倒V警告、動能負 + 轉強 = 💡 V轉回升中
 - **候選池**：S&P 500 前 100 + `data/watchlist.json` 白名單
 - **Sizing**：等權重 cash / available_slots
 - **報價定義**：前一交易日收盤價（盤前 yfinance 最後一筆 Close）

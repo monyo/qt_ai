@@ -17,7 +17,7 @@ from src.risk import check_position_limit
 from src.premarket import generate_actions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
-from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch
+from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_trend_state_batch
 from src.notifier import GmailNotifier
 
 
@@ -163,8 +163,12 @@ def run_premarket(scan_tw=False):
     print(f"正在計算 {len(alpha_symbols)} 檔標的的 1 年超額報酬...")
     alpha_1y_map = calculate_alpha_batch(alpha_symbols)
 
-    # 5. 產出 actions（使用動能排名 + 三層出場）
-    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map)
+    # 4.8 計算持倉趨勢狀態（V轉/倒V/盤整）
+    print(f"正在計算 {len(held_symbols)} 檔持倉的趨勢狀態...")
+    trend_state_map = calculate_trend_state_batch(held_symbols)
+
+    # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態）
+    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map)
 
     # 6. 計算投組總值
     total_value = portfolio.get("cash", 0)
@@ -257,9 +261,20 @@ def run_premarket(scan_tw=False):
                 alpha_str = f"  1Y: {alpha:+.0f}% {alpha_emoji}"
             else:
                 alpha_str = ""
+            # 趨勢狀態
+            ts = a.get('trend_state')
+            if ts:
+                ts_emoji = {"轉強": "↗️", "轉弱": "↘️", "盤整": "→"}.get(ts["state"], "")
+                ts_str = f"  {ts_emoji}{ts['state']}"
+                if ts["state"] == "轉弱":
+                    ts_str += f"(距高{ts['from_high_pct']:+.0f}%)"
+                elif ts["state"] == "轉強":
+                    ts_str += f"(反彈{ts['bounce_pct']:+.0f}%)"
+            else:
+                ts_str = ""
             tag = "[core]" if a["source"] == "core_hold" else "      "
             price = a.get('current_price') or 0
-            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}")
+            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}")
         print()
 
     if adds:

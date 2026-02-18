@@ -245,6 +245,76 @@ def calculate_alpha_batch(symbols: list, benchmark: str = "SPY", max_workers: in
     return results
 
 
+def calculate_trend_state(symbol: str) -> dict | None:
+    """計算單一標的的趨勢狀態（40日低點反彈% + 距40日高點%）
+
+    回測驗證：轉強組未來21日平均報酬 +2.86%（勝率58%），
+    轉弱組僅 +0.72%（勝率52%），月差 +2.14%。
+
+    Args:
+        symbol: 股票代碼
+
+    Returns:
+        dict: {bounce_pct, from_high_pct, state}
+        state: "轉強"(↗), "轉弱"(↘), "盤整"(→)
+    """
+    try:
+        df = yf.Ticker(symbol).history(period="3mo")
+        if df.empty or len(df) < 40:
+            return None
+
+        closes_40d = df['Close'].iloc[-40:]
+        current = closes_40d.iloc[-1]
+        low_40d = closes_40d.min()
+        high_40d = closes_40d.max()
+
+        if low_40d == 0 or high_40d == 0:
+            return None
+
+        bounce_pct = (current / low_40d - 1) * 100
+        from_high_pct = (current / high_40d - 1) * 100
+
+        if bounce_pct > 20 and from_high_pct > -5:
+            state = "轉強"
+        elif from_high_pct < -15:
+            state = "轉弱"
+        else:
+            state = "盤整"
+
+        return {
+            "bounce_pct": round(bounce_pct, 1),
+            "from_high_pct": round(from_high_pct, 1),
+            "state": state,
+        }
+    except Exception:
+        return None
+
+
+def calculate_trend_state_batch(symbols: list, max_workers: int = 10) -> dict:
+    """批次計算多檔標的的趨勢狀態
+
+    Args:
+        symbols: 股票代碼列表
+        max_workers: 最大並行數
+
+    Returns:
+        dict: {symbol: {bounce_pct, from_high_pct, state}}
+    """
+    results = {}
+
+    def fetch_one(sym):
+        return sym, calculate_trend_state(sym)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_one, sym): sym for sym in symbols}
+        for future in as_completed(futures):
+            sym, data = future.result()
+            if data is not None:
+                results[sym] = data
+
+    return results
+
+
 if __name__ == "__main__":
     # 測試
     test_symbols = ['NVDA', 'AAPL', 'MSFT', 'GOOG', 'AMZN', 'META', 'TSLA', 'SHOP', 'MU', 'UEC']

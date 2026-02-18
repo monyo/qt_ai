@@ -86,8 +86,17 @@ class GmailNotifier:
             lines.append("")
 
         if holds:
-            symbols = [a["symbol"] for a in holds]
-            lines.append(f"HOLD ({len(holds)} 檔): {', '.join(symbols)}")
+            # 標註有趨勢警告的持倉
+            hold_parts = []
+            for a in holds:
+                ts = a.get("trend_state")
+                if ts and ts["state"] == "轉弱":
+                    hold_parts.append(f"{a['symbol']}(↘️轉弱)")
+                elif ts and ts["state"] == "轉強":
+                    hold_parts.append(f"{a['symbol']}(↗️轉強)")
+                else:
+                    hold_parts.append(a["symbol"])
+            lines.append(f"HOLD ({len(holds)} 檔): {', '.join(hold_parts)}")
             lines.append("")
 
         if adds:
@@ -198,7 +207,16 @@ class GmailNotifier:
 
         holds_html = ""
         if holds:
-            symbols = ", ".join(a["symbol"] for a in holds)
+            hold_parts = []
+            for a in holds:
+                ts = a.get("trend_state")
+                if ts and ts["state"] == "轉弱":
+                    hold_parts.append(f'<span style="color:#dc3545;">{a["symbol"]}↘️</span>')
+                elif ts and ts["state"] == "轉強":
+                    hold_parts.append(f'<span style="color:#28a745;">{a["symbol"]}↗️</span>')
+                else:
+                    hold_parts.append(a["symbol"])
+            symbols = ", ".join(hold_parts)
             holds_html = f'<h3 style="color:#6c757d;">HOLD ({len(holds)} 檔)</h3><p>{symbols}</p>'
 
         adds_html = ""

@@ -2,15 +2,15 @@ import math
 from datetime import date
 from src.risk import check_all_exit_conditions, check_position_limit
 
-VERSION = "0.7.2"  # RSI 只警告不過濾（回測顯示飆股超買仍可續漲）
+VERSION = "0.8.0"  # 新增趨勢狀態指標（V轉/倒V/盤整），回測月差+2.14%
 
 # 汰弱留強參數（參考學術研究的定期重新排名邏輯）
 ROTATE_MOMENTUM_DIFF = 10      # 動能差距門檻 (%)，從 20% 降至 10%
 ROTATE_HOLDING_DAYS_MIN = 30   # 最少持有天數，從 60 天降至 30 天
 
 
-def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None):
-    """盤前決策引擎（動能策略 + 三層出場）
+def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None, trend_state_map=None):
+    """盤前決策引擎（動能策略 + 三層出場 + 趨勢狀態）
 
     Args:
         portfolio: 持倉狀態 dict
@@ -18,6 +18,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         ma200_prices: {symbol: ma200_value} MA200 資料
         momentum_ranks: [{"symbol": str, "momentum": float, "rank": int}, ...]
         alpha_1y_map: {symbol: alpha_1y} 1 年超額報酬（vs SPY）
+        trend_state_map: {symbol: {bounce_pct, from_high_pct, state}} 趨勢狀態
 
     Returns:
         actions: list of action dicts
@@ -28,6 +29,8 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         momentum_ranks = []
     if alpha_1y_map is None:
         alpha_1y_map = {}
+    if trend_state_map is None:
+        trend_state_map = {}
 
     actions = []
     action_id = 0
@@ -65,6 +68,9 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         # 取得 1 年超額報酬
         alpha_1y = alpha_1y_map.get(symbol)
 
+        # 取得趨勢狀態
+        trend_state = trend_state_map.get(symbol)
+
         if pos.get("core", False):
             # 核心持倉：永遠 HOLD
             actions.append({
@@ -78,6 +84,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "pnl_pct": pnl_pct,
                 "momentum": momentum,
                 "alpha_1y": alpha_1y,
+                "trend_state": trend_state,
                 "reason": "核心持倉",
                 "source": "core_hold",
                 "status": "auto",
@@ -96,6 +103,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "pnl_pct": pnl_pct,
                 "momentum": momentum,
                 "alpha_1y": alpha_1y,
+                "trend_state": trend_state,
                 "reason": exit_info["message"],
                 "source": exit_info["reason"],
                 "status": "pending",
@@ -111,6 +119,13 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 else:
                     reason = f"持有中，動能偏弱 ({momentum:.1f}%)"
 
+            # 趨勢狀態警告
+            if trend_state:
+                if trend_state["state"] == "轉弱" and (momentum is not None and momentum > 0):
+                    reason += " ⚠️ 倒V警告"
+                elif trend_state["state"] == "轉強" and (momentum is not None and momentum < 0):
+                    reason += " 💡 V轉回升中"
+
             actions.append({
                 "id": action_id,
                 "action": "HOLD",
@@ -123,6 +138,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "momentum": momentum,
                 "momentum_rank": rank,
                 "alpha_1y": alpha_1y,
+                "trend_state": trend_state,
                 "reason": reason,
                 "source": "momentum",
                 "status": "auto",
