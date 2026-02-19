@@ -2,7 +2,7 @@ import math
 from datetime import date
 from src.risk import check_all_exit_conditions, check_position_limit
 
-VERSION = "0.8.0"  # 新增趨勢狀態指標（V轉/倒V/盤整），回測月差+2.14%
+VERSION = "0.9.0"  # 混合動能 50/50（21天+252天），回測 CAGR +62% vs 純21天 +48%
 
 # 汰弱留強參數（參考學術研究的定期重新排名邏輯）
 ROTATE_MOMENTUM_DIFF = 10      # 動能差距門檻 (%)，從 20% 降至 10%

@@ -70,6 +70,7 @@ Quantitative stock scanning + position management system. Combines technical ana
 | `premarket.py` | 決策引擎。產出 HOLD/EXIT/ADD/ROTATE actions，含 source 和 version 欄位 |
 | `data_loader.py` | yfinance 資料取得（含快取）、S&P 500 ticker 列表、批次最新報價 |
 | `strategy.py` | 技術訊號：buy when Price > MA60 AND RSI < 70, sell when Price < MA60 OR RSI > 85 |
+| `momentum.py` | 混合動能排名（50% 短期21天 + 50% 長期252天）、RSI、1Y Alpha、趨勢狀態 |
 | `backtester.py` | 回測引擎。Signal → Position 狀態機，計算 Return%, MDD%, WinRate% |
 | `ai_analyst.py` | 新聞抓取 + Gemini 2.0 Flash 情緒分析 (-1.0 to +1.0) |
 | `indicators.py` | SMA, RSI 指標（pandas_ta） |
