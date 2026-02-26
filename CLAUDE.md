@@ -92,6 +92,12 @@ Quantitative stock scanning + position management system. Combines technical ana
   - 觸發條件：動能差距 >10% 且持有 >30 天
   - 主動建議換股，不限於現金不足時
   - 排除 core 和 favorite 標的
+  - confirm 時可輸入實際股數（支援部分賣出/買入），sell/buy 獨立設定
+- **ADD / TOPUP 合併顯示**：
+  - ADD 清單同時顯示「現金」與「ROTATE 後」兩種股數建議
+  - `suggested_shares_post_rotate`：ROTATE 賣出收回現金後，扣除安全 TOPUP 預算，再分配給 ADD 槽位
+  - 安全 TOPUP（停損高於成本）以 `[增持]` 標籤合入 ADD 清單，目標補到等權重（total_value/30）
+  - 非安全 TOPUP 獨立顯示於下方「風險較高」區塊
 - **RSI 警告**：🔴 RSI > 80 極度超買、🟡 RSI > 75 超買（只警告不過濾，讓使用者決定）
 - **趨勢狀態**（回測驗證月差 +2.14%）：
   - ↗️ 轉強：40 日低點反彈 >20% 且距高點 <5%（V 轉格局）
@@ -99,7 +105,7 @@ Quantitative stock scanning + position management system. Combines technical ana
   - → 盤整：其他
   - 特殊警告：動能正 + 轉弱 = ⚠️ 倒V警告、動能負 + 轉強 = 💡 V轉回升中
 - **候選池**：S&P 500 前 100 + `data/watchlist.json` 白名單
-- **Sizing**：等權重 cash / available_slots
+- **Sizing**：等權重 cash / available_slots；TOPUP 增持目標為 total_value / 30（等權重）
 - **報價定義**：前一交易日收盤價（盤前 yfinance 最後一筆 Close）
 - Signal 是事件（1/-1/0），backtester 轉為 Position（0/1）狀態機
 - AI 情緒在 API 額度用完時降級為中性 (0.0)
@@ -113,5 +119,7 @@ Quantitative stock scanning + position management system. Combines technical ana
 | 2026-01-01 | 年初基準值 | $126,970.93 |
 | 2026-02-13 | Firstrade 實際值 | $125,150 |
 | 2026-02-13 | YTD P&L | -$1,821 (-1.43%) |
+| 2026-02-26 | Firstrade 實際值 | $128,587 |
+| 2026-02-26 | YTD P&L | +$1,616 (+1.3%) |
 
 **注意**：投組總值以 Firstrade 實際數字為準，yfinance 報價可能有微小差異。
