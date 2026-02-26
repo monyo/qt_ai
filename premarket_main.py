@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 from datetime import datetime, date
 
@@ -14,7 +15,7 @@ from src.portfolio import (
 from src.data_loader import get_sp500_tickers, fetch_current_prices, get_tw50_tickers, TW_STOCK_NAMES
 from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
 from src.risk import check_position_limit
-from src.premarket import generate_actions, VERSION
+from src.premarket import generate_actions, generate_topup_suggestions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
 from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_trend_state_batch
@@ -170,6 +171,43 @@ def run_premarket(scan_tw=False):
     # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態）
     actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map)
 
+    # 5.5 增持參考（倉位偏小 + 動能強 + 趨勢轉強）
+    total_value_for_topup = portfolio.get("cash", 0) + sum(
+        current_prices.get(sym, pos["avg_price"]) * pos["shares"]
+        for sym, pos in positions.items()
+    )
+    topup_suggestions = generate_topup_suggestions(
+        portfolio, current_prices, momentum_ranks, alpha_1y_map, trend_state_map, total_value_for_topup
+    )
+
+    # 5.6 篩選「安全」TOPUP，計算補到等權重所需股數
+    CASH_SAFETY_FACTOR = 0.85
+    equal_weight = total_value_for_topup / 30
+    safe_topups = []
+    for s in topup_suggestions:
+        if "安全" not in s.get("safety", ""):
+            continue
+        current_val = s["current_price"] * s["shares"]
+        needed = max(0, equal_weight - current_val)
+        topup_shares = math.floor(needed / s["current_price"]) if s["current_price"] > 0 else 0
+        topup_cost = topup_shares * s["current_price"]
+        if topup_shares > 0:
+            safe_topups.append({**s, "topup_shares": topup_shares, "topup_cost": topup_cost})
+
+    # 5.7 重算 ROTATE 後的 ADD 股數（扣除安全 TOPUP 預算）
+    adds_list = [a for a in actions if a["action"] == "ADD"]
+    rotates_list = [a for a in actions if a["action"] == "ROTATE"]
+    rotate_proceeds = sum(a["sell_shares"] * a["sell_price"] * CASH_SAFETY_FACTOR for a in rotates_list)
+    post_rotate_cash = portfolio.get("cash", 0) + rotate_proceeds
+    topup_total_cost = sum(s["topup_cost"] for s in safe_topups)
+    remaining_for_add = max(0, post_rotate_cash - topup_total_cost)
+    if adds_list:
+        post_rotate_per_slot = remaining_for_add / len(adds_list)
+        for a in adds_list:
+            price = a.get("current_price", 0)
+            if price > 0:
+                a["suggested_shares_post_rotate"] = math.floor(post_rotate_per_slot / price)
+
     # 6. 計算投組總值
     total_value = portfolio.get("cash", 0)
     for symbol, pos in positions.items():
@@ -198,6 +236,8 @@ def run_premarket(scan_tw=False):
             "tech_ratio": sector_exposure["tech_ratio"],
         },
         "actions": actions,
+        "topup_suggestions": topup_suggestions,
+        "safe_topups": safe_topups,
     }
 
     actions_path = f"data/actions_{today_str}.json"
@@ -277,8 +317,8 @@ def run_premarket(scan_tw=False):
             print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}")
         print()
 
-    if adds:
-        print("--- ADD (建議買入) ---")
+    if adds or safe_topups:
+        print("--- ADD / TOPUP 建議 ---")
         for a in adds:
             momentum_str = f"動能: +{a.get('momentum', 0):.1f}%"
             alpha = a.get('alpha_1y')
@@ -287,8 +327,18 @@ def run_premarket(scan_tw=False):
                 alpha_str = f"  1Y vs SPY: {alpha:+.0f}% {alpha_emoji}"
             else:
                 alpha_str = ""
-            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']:<6} 建議 {a['suggested_shares']} 股 @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
+            shares_str = str(a['suggested_shares'])
+            post_rotate_shares = a.get('suggested_shares_post_rotate')
+            if post_rotate_shares is not None and post_rotate_shares != a['suggested_shares']:
+                shares_str += f" (ROTATE後 {post_rotate_shares} 股)"
+            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']:<6} 建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
             print(f"         原因: {a['reason']}")
+        for s in safe_topups:
+            weight_after = (s["current_price"] * (s["shares"] + s["topup_shares"])) / total_value_for_topup * 100
+            momentum_str = f"動能: +{s['momentum']:.1f}%(#{s['momentum_rank']})"
+            alpha = s.get("alpha_1y")
+            alpha_str = f"  1Y: {alpha:+.0f}%" if alpha is not None else ""
+            print(f"  [增持] {s['symbol']:<6} +{s['topup_shares']} 股 @ ${s['current_price']:.2f}  {momentum_str}  倉位 {s['current_weight_pct']:.1f}%→{weight_after:.1f}%  {s['safety']}{alpha_str}")
         print()
 
     # ROTATE 建議（汰弱留強）
@@ -307,6 +357,19 @@ def run_premarket(scan_tw=False):
             print(f"  → 買 {a['buy_symbol']:<6} {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
             print(f"       動能差: +{a['momentum_diff']:.0f}%  {a['reason']}")
             print()
+
+    # 增持參考（非安全，僅供參考）
+    non_safe_topups = [s for s in topup_suggestions if "安全" not in s.get("safety", "")]
+    if non_safe_topups:
+        print("--- TOPUP 增持參考（風險較高，僅供參考）---")
+        for s in non_safe_topups:
+            ts = s["trend_state"]
+            ts_str = f"↗️轉強(反彈{ts['bounce_pct']:+.0f}%)" if ts else ""
+            alpha = s.get("alpha_1y")
+            alpha_str = f"  1Y: {alpha:+.0f}%" if alpha is not None else ""
+            print(f"  {s['symbol']:<6} 倉位{s['current_weight_pct']:.1f}%  動能+{s['momentum']:.1f}%(#{s['momentum_rank']})  {ts_str}")
+            print(f"         現價${s['current_price']:.2f}  成本${s['avg_price']:.2f}  追高{s['run_up_pct']:+.1f}%  {s['safety']}  {s['safety_note']}{alpha_str}")
+        print()
 
     # === 台股觀察（全市場掃描，需加 --tw 開啟）===
     if scan_tw:

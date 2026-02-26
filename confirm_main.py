@@ -33,40 +33,61 @@ def run_confirm(date_str):
 
     for a in pending:
         action_type = a["action"]
-        symbol = a["symbol"]
 
         if action_type == "EXIT":
+            symbol = a["symbol"]
             pnl = f"{a['pnl_pct']:+.2f}%" if a.get("pnl_pct") is not None else "N/A"
             print(f"[{a['id']}] EXIT {symbol} | {a['shares']} 股 | P&L: {pnl}")
             print(f"    原因: {a['reason']}")
         elif action_type == "ADD":
+            symbol = a["symbol"]
             print(f"[{a['id']}] ADD  {symbol} | 建議 {a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}")
             print(f"    原因: {a['reason']}")
+        elif action_type == "ROTATE":
+            sell_sym = a["sell_symbol"]
+            buy_sym = a["buy_symbol"]
+            print(f"[{a['id']}] ROTATE 賣 {sell_sym} {a['sell_shares']} 股 → 買 {buy_sym} {a['buy_shares']} 股")
+            print(f"    原因: {a['reason']}")
+        else:
+            symbol = a.get("symbol", "?")
+            print(f"[{a['id']}] {action_type} {symbol}")
+            print(f"    原因: {a.get('reason', '')}")
 
-        choice = input("    確認執行？(y=確認 / n=跳過 / m=修改數量和價格): ").strip().lower()
+        choice = input("    確認執行？(y=確認 / n=跳過): ").strip().lower()
 
         if choice == "y":
+            if action_type == "ADD":
+                default_shares = a.get("suggested_shares", 0)
+                default_price = a.get("current_price", 0)
+                shares_input = input(f"    實際買入股數 [{default_shares}]: ").strip()
+                price_input = input(f"    實際成交價 [{default_price:.2f}]: ").strip()
+                a["actual_shares"] = int(shares_input) if shares_input else default_shares
+                a["actual_price"] = float(price_input) if price_input else default_price
+            elif action_type == "EXIT":
+                default_shares = a.get("shares", 0)
+                default_price = a.get("current_price", 0)
+                shares_input = input(f"    實際賣出股數 [{default_shares}]: ").strip()
+                price_input = input(f"    實際成交價 [{default_price:.2f}]: ").strip()
+                a["actual_shares"] = int(shares_input) if shares_input else default_shares
+                a["actual_price"] = float(price_input) if price_input else default_price
+            elif action_type == "ROTATE":
+                default_sell_shares = a.get("sell_shares", 0)
+                default_sell_price = a.get("sell_price", 0)
+                default_buy_shares = a.get("buy_shares", 0)
+                default_buy_price = a.get("buy_price", 0)
+                sell_shares_input = input(f"    賣出 {a['sell_symbol']} 股數 [{default_sell_shares}]: ").strip()
+                sell_price_input = input(f"    賣出成交價 [{default_sell_price:.2f}]: ").strip()
+                buy_shares_input = input(f"    買入 {a['buy_symbol']} 股數 [{default_buy_shares}]: ").strip()
+                buy_price_input = input(f"    買入成交價 [{default_buy_price:.2f}]: ").strip()
+                a["actual_sell_shares"] = int(sell_shares_input) if sell_shares_input else default_sell_shares
+                a["actual_sell_price"] = float(sell_price_input) if sell_price_input else default_sell_price
+                a["actual_buy_shares"] = int(buy_shares_input) if buy_shares_input else default_buy_shares
+                a["actual_buy_price"] = float(buy_price_input) if buy_price_input else default_buy_price
+
             a["status"] = "confirmed"
             a["confirm_date"] = str(date.today())
             confirmed_actions.append(a)
             print(f"    -> 已確認\n")
-
-        elif choice == "m":
-            if action_type == "ADD":
-                shares_input = input(f"    實際買入股數 (預設 {a.get('suggested_shares', 0)}): ").strip()
-                price_input = input(f"    實際成交價 (預設 {a.get('current_price', 0):.2f}): ").strip()
-                a["actual_shares"] = int(shares_input) if shares_input else a.get("suggested_shares", 0)
-                a["actual_price"] = float(price_input) if price_input else a.get("current_price", 0)
-            elif action_type == "EXIT":
-                shares_input = input(f"    實際賣出股數 (預設 {a.get('shares', 0)}): ").strip()
-                price_input = input(f"    實際成交價 (預設 {a.get('current_price', 0):.2f}): ").strip()
-                a["actual_shares"] = int(shares_input) if shares_input else a.get("shares", 0)
-                a["actual_price"] = float(price_input) if price_input else a.get("current_price", 0)
-
-            a["status"] = "confirmed"
-            a["confirm_date"] = str(date.today())
-            confirmed_actions.append(a)
-            print(f"    -> 已確認（修改後）\n")
 
         else:
             a["status"] = "skipped"

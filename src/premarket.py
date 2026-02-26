@@ -164,6 +164,8 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
     RSI_OVERBOUGHT = 75  # RSI > 75 超買警告
     RSI_EXTREME = 80     # RSI > 80 極度超買警告
 
+    num_to_add = 0  # 供後續 post-rotate 計算使用
+
     if available_slots > 0 and momentum_ranks:
         # 篩選：動能 > 0 + 尚未持有 + 不在 EXIT 名單
         exit_symbols = {a["symbol"] for a in actions if a["action"] == "EXIT"}
@@ -314,4 +316,100 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                     rotate_used_candidates.add(candidate_symbol)
                     break  # 這個持倉已配對，換下一個
 
+    # === 5. 計算 ROTATE 後的 ADD 股數（供參考） ===
+    rotates = [a for a in actions if a["action"] == "ROTATE"]
+    if rotates and num_to_add > 0:
+        rotate_proceeds = sum(
+            a["sell_shares"] * a["sell_price"] * CASH_SAFETY_FACTOR
+            for a in rotates
+        )
+        post_rotate_position_size = (projected_cash + rotate_proceeds) / num_to_add
+        for a in actions:
+            if a["action"] == "ADD":
+                price = a.get("current_price", 0)
+                if price > 0:
+                    a["suggested_shares_post_rotate"] = math.floor(post_rotate_position_size / price)
+
     return actions
+
+
+# 增持參考參數
+TOPUP_MOMENTUM_MIN = 15   # 最低動能門檻 (%)
+TOPUP_MAX_WEIGHT = 0.02   # 倉位比重上限（超過此比重不建議加碼）
+FIXED_STOP_LOSS = 0.85    # 停損係數（-15%）
+
+
+def generate_topup_suggestions(portfolio, current_prices, momentum_ranks, alpha_1y_map, trend_state_map, total_value):
+    """掃描現有持倉，找出倉位偏小且值得加碼的標的
+
+    條件：非核心、動能 > 15%、趨勢轉強、倉位比重 < 2%
+    關鍵指標：追高幅度、加碼後新停損 vs 原始成本
+
+    Returns:
+        list of suggestion dicts，按動能排序
+    """
+    suggestions = []
+    positions = portfolio.get("positions", {})
+    momentum_map = {m["symbol"]: m for m in momentum_ranks}
+
+    for symbol, pos in positions.items():
+        if pos.get("core", False):
+            continue
+
+        price = current_prices.get(symbol)
+        if not price or price <= 0:
+            continue
+
+        # 倉位比重過濾
+        current_weight = (price * pos["shares"]) / total_value if total_value > 0 else 0
+        if current_weight >= TOPUP_MAX_WEIGHT:
+            continue
+
+        # 動能過濾
+        m_info = momentum_map.get(symbol, {})
+        momentum = m_info.get("momentum")
+        if momentum is None or momentum < TOPUP_MOMENTUM_MIN:
+            continue
+
+        # 趨勢過濾（只建議轉強標的）
+        trend_state = trend_state_map.get(symbol, {})
+        if trend_state.get("state") != "轉強":
+            continue
+
+        # 追高風險評估
+        avg_price = pos["avg_price"]
+        run_up_pct = (price - avg_price) / avg_price * 100
+        new_stop = round(price * FIXED_STOP_LOSS, 2)
+        stop_vs_cost = new_stop - avg_price
+
+        stop_pct_vs_cost = stop_vs_cost / avg_price * 100  # 負數=停損低於成本多少%
+
+        if stop_vs_cost >= 0:
+            safety = "🟢 安全"
+            safety_note = f"停損${new_stop:.2f} 高於成本（原始獲利鎖住）"
+        elif stop_pct_vs_cost >= -8:
+            safety = "🟡 謹慎"
+            safety_note = f"停損${new_stop:.2f} 低於成本 {stop_pct_vs_cost:.1f}%（風險可控）"
+        else:
+            safety = "🔴 風險高"
+            safety_note = f"停損${new_stop:.2f} 低於成本 {stop_pct_vs_cost:.1f}%（原始成本曝險）"
+
+        suggestions.append({
+            "symbol": symbol,
+            "current_price": price,
+            "avg_price": avg_price,
+            "shares": pos["shares"],
+            "current_weight_pct": round(current_weight * 100, 1),
+            "run_up_pct": round(run_up_pct, 1),
+            "momentum": momentum,
+            "momentum_rank": m_info.get("rank"),
+            "trend_state": trend_state,
+            "new_stop": new_stop,
+            "stop_vs_cost": round(stop_vs_cost, 2),
+            "safety": safety,
+            "safety_note": safety_note,
+            "alpha_1y": alpha_1y_map.get(symbol),
+        })
+
+    suggestions.sort(key=lambda x: x["momentum"], reverse=True)
+    return suggestions

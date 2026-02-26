@@ -99,14 +99,14 @@ class GmailNotifier:
             lines.append(f"HOLD ({len(holds)} 檔): {', '.join(hold_parts)}")
             lines.append("")
 
-        if adds:
-            lines.append(f"ADD 建議 ({len(adds)} 檔):")
+        safe_topups = data.get("safe_topups", [])
+        if adds or safe_topups:
+            lines.append(f"ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持):")
             for a in adds:
                 momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
                 rank = a.get("momentum_rank", "?")
                 shares = a.get("suggested_shares", 0)
 
-                # Format RSI warning
                 rsi_str = ""
                 rsi = a.get("rsi")
                 if rsi is not None and rsi > 80:
@@ -114,14 +114,21 @@ class GmailNotifier:
                 elif rsi is not None and rsi > 75:
                     rsi_str = f"  🟡 RSI {rsi:.0f}"
 
-                # Format alpha_1y
                 alpha_str = ""
                 alpha_1y = a.get("alpha_1y")
                 if alpha_1y is not None:
                     alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
                     alpha_str = f"  1Y: {alpha_1y:+.0f}% {alpha_emoji}"
 
-                lines.append(f"  #{rank} {a['symbol']:<6} 建議 {shares} 股 @ ${a.get('current_price', 0):.2f}  {momentum}{rsi_str}{alpha_str}")
+                shares_str = str(shares)
+                post_rotate = a.get("suggested_shares_post_rotate")
+                if post_rotate is not None and post_rotate != shares:
+                    shares_str += f" (ROTATE後 {post_rotate} 股)"
+                lines.append(f"  #{rank} {a['symbol']:<6} 建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum}{rsi_str}{alpha_str}")
+            for s in safe_topups:
+                momentum = f"+{s.get('momentum', 0):.1f}%(#{s.get('momentum_rank', '?')})"
+                alpha_str = f"  1Y: {s['alpha_1y']:+.0f}%" if s.get("alpha_1y") is not None else ""
+                lines.append(f"  [增持] {s['symbol']:<6} +{s['topup_shares']} 股 @ ${s['current_price']:.2f}  {momentum}  {s['current_weight_pct']:.1f}%→等權重  🟢 安全{alpha_str}")
             lines.append("")
 
         # ROTATE 建議（汰弱留強）
@@ -139,6 +146,37 @@ class GmailNotifier:
                 lines.append(f"  → 買 {a['buy_symbol']:<6} {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
                 lines.append(f"     {a.get('reason', '')}")
                 lines.append("")
+
+        # TOPUP 增持參考
+        topups = data.get("topup_suggestions", [])
+        if topups:
+            lines.append(f"TOPUP 增持參考（倉位<2%、動能強、趨勢轉強）({len(topups)} 檔):")
+            for s in topups:
+                lines.append(f"  {s['symbol']:<6} 倉位{s['current_weight_pct']:.1f}%  動能+{s['momentum']:.1f}%(#{s['momentum_rank']})  追高{s['run_up_pct']:+.1f}%  {s['safety']}")
+                lines.append(f"         現價${s['current_price']:.2f}  成本${s['avg_price']:.2f}  新停損${s['new_stop']:.2f}  {s['safety_note']}")
+            lines.append("")
+
+        # 需注意
+        watch_lines = []
+        # 1. 動能轉弱持倉
+        weak = [a for a in holds if a.get("momentum") is not None and a.get("momentum") < 0]
+        for a in sorted(weak, key=lambda x: x["momentum"]):
+            ts = a.get("trend_state", {})
+            trend = ts.get("state", "") if ts else ""
+            watch_lines.append(f"  ⚠️  {a['symbol']:<6} 動能{a['momentum']:+.1f}% {trend}  P&L: {a.get('pnl_pct', 0):+.1f}%")
+        # 2. P&L 偏低持倉（< -3%）
+        losing = [a for a in holds if a.get("pnl_pct") is not None and a["pnl_pct"] < -3 and (a.get("momentum") or 0) >= 0]
+        for a in sorted(losing, key=lambda x: x["pnl_pct"]):
+            stop_price = round(a["avg_price"] * 0.85, 2)
+            watch_lines.append(f"  🔴 {a['symbol']:<6} P&L {a['pnl_pct']:+.1f}%  停損線 ${stop_price:.2f}")
+        # 3. ROTATE 目標 1Y Alpha 差
+        bad_rotates = [a for a in rotates if a.get("buy_alpha_1y") is not None and a["buy_alpha_1y"] < -20]
+        for a in bad_rotates:
+            watch_lines.append(f"  ⚠️  ROTATE {a['sell_symbol']}→{a['buy_symbol']} 換股目標 1Y落後大盤 {a['buy_alpha_1y']:+.0f}%，建議謹慎")
+        if watch_lines:
+            lines.append("需注意:")
+            lines.extend(watch_lines)
+            lines.append("")
 
         # 台股觀察
         tw_stocks = data.get("tw_stocks", {})
@@ -219,15 +257,15 @@ class GmailNotifier:
             symbols = ", ".join(hold_parts)
             holds_html = f'<h3 style="color:#6c757d;">HOLD ({len(holds)} 檔)</h3><p>{symbols}</p>'
 
+        safe_topups = data.get("safe_topups", [])
         adds_html = ""
-        if adds:
+        if adds or safe_topups:
             rows = ""
             for a in adds:
                 momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
                 shares = a.get("suggested_shares", 0)
                 price = a.get("current_price", 0)
 
-                # Format RSI warning for HTML
                 rsi_html = "<td></td>"
                 rsi = a.get("rsi")
                 if rsi is not None and rsi > 80:
@@ -237,18 +275,30 @@ class GmailNotifier:
                 elif rsi is not None:
                     rsi_html = f'<td style="color:#28a745;">{rsi:.0f}</td>'
 
-                # Format alpha_1y for HTML
                 alpha_html = "<td></td>"
                 alpha_1y = a.get("alpha_1y")
                 if alpha_1y is not None:
                     alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
                     alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>"
 
-                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td>{shares} 股</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
+                shares_str = str(shares)
+                post_rotate = a.get("suggested_shares_post_rotate")
+                if post_rotate is not None and post_rotate != shares:
+                    shares_str += f'<br><span style="color:#fd7e14;font-size:11px;">ROTATE後 {post_rotate} 股</span>'
+                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
+
+            for s in safe_topups:
+                momentum = f"+{s.get('momentum', 0):.1f}%(#{s.get('momentum_rank', '?')})"
+                alpha_html = "<td></td>"
+                if s.get("alpha_1y") is not None:
+                    alpha_emoji = "🟢" if s["alpha_1y"] > 0 else ("🟡" if s["alpha_1y"] > -20 else "🔴")
+                    alpha_html = f"<td>{alpha_emoji} {s['alpha_1y']:+.0f}%</td>"
+                rows += f'<tr style="background:#f0fff0;"><td style="color:#28a745;">增持</td><td><strong>{s["symbol"]}</strong></td><td>+{s["topup_shares"]} 股<br><span style="font-size:11px;color:#28a745;">{s["current_weight_pct"]:.1f}%→等權重 🟢</span></td><td>${s["current_price"]:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
+
             adds_html = f'''
-            <h3 style="color:#28a745;">ADD 建議 ({len(adds)} 檔)</h3>
+            <h3 style="color:#28a745;">ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;">排名</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">類型</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th></tr>
                 {rows}
             </table>'''
 
@@ -284,6 +334,50 @@ class GmailNotifier:
                 <tr style="background:#f8f9fa;"><th style="padding:8px;">賣出</th><th>股數</th><th>動能</th><th>P&L</th><th>買入</th><th>股數</th><th>動能</th><th>1Y</th></tr>
                 {rows}
             </table>'''
+
+        # TOPUP 增持參考
+        topups = data.get("topup_suggestions", [])
+        topups_html = ""
+        if topups:
+            rows = ""
+            for s in topups:
+                safety_color = "#28a745" if "安全" in s["safety"] else ("#fd7e14" if "謹慎" in s["safety"] else "#dc3545")
+                rows += f'''<tr style="border-bottom:1px solid #eee;">
+                    <td style="padding:6px;"><strong>{s["symbol"]}</strong></td>
+                    <td>{s["current_weight_pct"]:.1f}%</td>
+                    <td>+{s["momentum"]:.1f}% (#{s["momentum_rank"]})</td>
+                    <td>{s["run_up_pct"]:+.1f}%</td>
+                    <td style="color:{safety_color};">{s["safety"]}</td>
+                    <td>${s["current_price"]:.2f}</td>
+                    <td>${s["avg_price"]:.2f}</td>
+                    <td>${s["new_stop"]:.2f}</td>
+                </tr>'''
+            topups_html = f'''
+            <h3 style="color:#6f42c1;">TOPUP 增持參考（倉位&lt;2%、動能強、趨勢轉強）</h3>
+            <table style="border-collapse:collapse;width:100%;font-size:13px;">
+                <tr style="background:#f8f9fa;"><th style="padding:6px;text-align:left;">標的</th><th>倉位</th><th>動能</th><th>追高</th><th>安全度</th><th>現價</th><th>成本</th><th>新停損</th></tr>
+                {rows}
+            </table>'''
+
+        # 需注意
+        watch_items = []
+        weak = [a for a in actions if a["action"] == "HOLD" and (a.get("momentum") or 0) < 0]
+        for a in sorted(weak, key=lambda x: x.get("momentum", 0)):
+            ts = a.get("trend_state", {}) or {}
+            trend = ts.get("state", "")
+            watch_items.append(f'<li>⚠️ <strong>{a["symbol"]}</strong> 動能{a.get("momentum", 0):+.1f}% {trend}，P&L: {a.get("pnl_pct", 0):+.1f}%</li>')
+        losing = [a for a in actions if a["action"] == "HOLD" and (a.get("pnl_pct") or 0) < -3 and (a.get("momentum") or 0) >= 0]
+        for a in sorted(losing, key=lambda x: x.get("pnl_pct", 0)):
+            stop_price = round(a["avg_price"] * 0.85, 2)
+            watch_items.append(f'<li>🔴 <strong>{a["symbol"]}</strong> P&L {a.get("pnl_pct", 0):+.1f}%，停損線 ${stop_price:.2f}</li>')
+        rotates_list = [a for a in actions if a["action"] == "ROTATE"]
+        for a in rotates_list:
+            if (a.get("buy_alpha_1y") or 0) < -20:
+                watch_items.append(f'<li>⚠️ ROTATE <strong>{a["sell_symbol"]}→{a["buy_symbol"]}</strong> 換股目標 1Y落後大盤 {a.get("buy_alpha_1y", 0):+.0f}%，建議謹慎</li>')
+        watch_html = ""
+        if watch_items:
+            items_str = "".join(watch_items)
+            watch_html = f'<div style="background:#f8d7da;padding:12px;border-radius:5px;margin:10px 0;"><strong>需注意</strong><ul style="margin:5px 0;">{items_str}</ul></div>'
 
         # 台股觀察
         tw_stocks = data.get("tw_stocks", {})
@@ -329,10 +423,12 @@ class GmailNotifier:
             </table>
 
             {alerts_html}
+            {watch_html}
             {exits_html}
             {holds_html}
             {adds_html}
             {rotates_html}
+            {topups_html}
             {tw_stocks_html}
 
             <hr style="margin:30px 0;border:none;border-top:1px solid #ddd;">

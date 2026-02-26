@@ -46,11 +46,11 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
         if action.get("status") != "confirmed":
             continue
 
-        symbol = action["symbol"]
         act = action["action"]
         tx_date = action.get("confirm_date", str(date.today()))
 
         if act == "ADD":
+            symbol = action["symbol"]
             shares = action.get("actual_shares", action.get("suggested_shares", 0))
             price = action.get("actual_price", action["current_price"])
             if shares <= 0:
@@ -70,7 +70,7 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
                     "avg_price": price,
                     "cost_basis": cost_basis,
                     "first_entry": tx_date,
-                    "high_since_entry": price,  # 初始化最高價為買入價
+                    "high_since_entry": price,
                     "core": False,
                 }
 
@@ -81,6 +81,7 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
             })
 
         elif act == "EXIT":
+            symbol = action["symbol"]
             shares = action.get("actual_shares", action.get("shares", 0))
             price = action.get("actual_price", action["current_price"])
             if shares <= 0:
@@ -99,6 +100,52 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
                 "date": tx_date, "symbol": symbol, "action": "EXIT",
                 "shares": shares, "price": price,
             })
+
+        elif act == "ROTATE":
+            sell_sym = action["sell_symbol"]
+            sell_shares = action.get("actual_sell_shares", action.get("sell_shares", 0))
+            sell_price = action.get("actual_sell_price", action.get("sell_price", 0))
+            buy_sym = action["buy_symbol"]
+            buy_shares = action.get("actual_buy_shares", action.get("buy_shares", 0))
+            buy_price = action.get("actual_buy_price", action.get("buy_price", 0))
+
+            # 賣出部分
+            if sell_shares > 0 and sell_sym in portfolio["positions"]:
+                pos = portfolio["positions"][sell_sym]
+                if sell_shares >= pos["shares"]:
+                    del portfolio["positions"][sell_sym]
+                else:
+                    pos["shares"] -= sell_shares
+                    pos["cost_basis"] = pos["avg_price"] * pos["shares"]
+                portfolio["cash"] += sell_price * sell_shares
+                portfolio["transactions"].append({
+                    "date": tx_date, "symbol": sell_sym, "action": "EXIT",
+                    "shares": sell_shares, "price": sell_price,
+                })
+
+            # 買入部分
+            if buy_shares > 0:
+                if buy_sym in portfolio["positions"]:
+                    pos = portfolio["positions"][buy_sym]
+                    pos["avg_price"] = calc_avg_price(
+                        pos["avg_price"], pos["shares"], buy_price, buy_shares
+                    )
+                    pos["shares"] += buy_shares
+                    pos["cost_basis"] = pos["avg_price"] * pos["shares"]
+                else:
+                    portfolio["positions"][buy_sym] = {
+                        "shares": buy_shares,
+                        "avg_price": buy_price,
+                        "cost_basis": buy_price * buy_shares,
+                        "first_entry": tx_date,
+                        "high_since_entry": buy_price,
+                        "core": False,
+                    }
+                portfolio["cash"] -= buy_price * buy_shares
+                portfolio["transactions"].append({
+                    "date": tx_date, "symbol": buy_sym, "action": "ADD",
+                    "shares": buy_shares, "price": buy_price,
+                })
 
 
 def load_watchlist(path=WATCHLIST_PATH):
