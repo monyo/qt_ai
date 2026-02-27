@@ -119,6 +119,10 @@ class GmailNotifier:
                 if alpha_1y is not None:
                     alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
                     alpha_str = f"  1Y: {alpha_1y:+.0f}% {alpha_emoji}"
+                alpha_3y = a.get("alpha_3y")
+                if alpha_3y is not None:
+                    alpha_3y_emoji = "🟢" if alpha_3y > 0 else ("🟡" if alpha_3y > -20 else "🔴")
+                    alpha_str += f"  3Y: {alpha_3y:+.0f}% {alpha_3y_emoji}"
 
                 shares_str = str(shares)
                 post_rotate = a.get("suggested_shares_post_rotate")
@@ -137,11 +141,15 @@ class GmailNotifier:
             lines.append(f"ROTATE 建議（汰弱留強）({len(rotates)} 組):")
             for a in rotates:
                 sell_pnl = f"{a.get('sell_pnl_pct', 0):+.1f}%" if a.get("sell_pnl_pct") is not None else "N/A"
-                buy_alpha = a.get("buy_alpha_1y")
+                buy_alpha_1y = a.get("buy_alpha_1y")
+                buy_alpha_3y = a.get("buy_alpha_3y")
                 alpha_str = ""
-                if buy_alpha is not None:
-                    alpha_emoji = "🟢" if buy_alpha > 0 else ("🟡" if buy_alpha > -20 else "🔴")
-                    alpha_str = f"1Y: {buy_alpha:+.0f}% {alpha_emoji}"
+                if buy_alpha_1y is not None:
+                    alpha_emoji = "🟢" if buy_alpha_1y > 0 else ("🟡" if buy_alpha_1y > -20 else "🔴")
+                    alpha_str = f"1Y: {buy_alpha_1y:+.0f}% {alpha_emoji}"
+                if buy_alpha_3y is not None:
+                    alpha_3y_emoji = "🟢" if buy_alpha_3y > 0 else ("🟡" if buy_alpha_3y > -20 else "🔴")
+                    alpha_str += f"  3Y: {buy_alpha_3y:+.0f}% {alpha_3y_emoji}"
                 lines.append(f"  賣 {a['sell_symbol']:<6} {a['sell_shares']} 股 (動能: {a['sell_momentum']:+.1f}%, P&L: {sell_pnl})")
                 lines.append(f"  → 買 {a['buy_symbol']:<6} {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
                 lines.append(f"     {a.get('reason', '')}")
@@ -275,11 +283,18 @@ class GmailNotifier:
                 elif rsi is not None:
                     rsi_html = f'<td style="color:#28a745;">{rsi:.0f}</td>'
 
-                alpha_html = "<td></td>"
+                alpha_html = "<td></td><td></td>"
                 alpha_1y = a.get("alpha_1y")
+                alpha_3y = a.get("alpha_3y")
                 if alpha_1y is not None:
                     alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
-                    alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>"
+                    alpha_3y_str = ""
+                    if alpha_3y is not None:
+                        alpha_3y_emoji = "🟢" if alpha_3y > 0 else ("🟡" if alpha_3y > -20 else "🔴")
+                        alpha_3y_str = f"<td>{alpha_3y_emoji} {alpha_3y:+.0f}%</td>"
+                    else:
+                        alpha_3y_str = "<td></td>"
+                    alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>{alpha_3y_str}"
 
                 shares_str = str(shares)
                 post_rotate = a.get("suggested_shares_post_rotate")
@@ -289,16 +304,16 @@ class GmailNotifier:
 
             for s in safe_topups:
                 momentum = f"+{s.get('momentum', 0):.1f}%(#{s.get('momentum_rank', '?')})"
-                alpha_html = "<td></td>"
+                alpha_html = "<td></td><td></td>"
                 if s.get("alpha_1y") is not None:
                     alpha_emoji = "🟢" if s["alpha_1y"] > 0 else ("🟡" if s["alpha_1y"] > -20 else "🔴")
-                    alpha_html = f"<td>{alpha_emoji} {s['alpha_1y']:+.0f}%</td>"
+                    alpha_html = f"<td>{alpha_emoji} {s['alpha_1y']:+.0f}%</td><td></td>"
                 rows += f'<tr style="background:#f0fff0;"><td style="color:#28a745;">增持</td><td><strong>{s["symbol"]}</strong></td><td>+{s["topup_shares"]} 股<br><span style="font-size:11px;color:#28a745;">{s["current_weight_pct"]:.1f}%→等權重 🟢</span></td><td>${s["current_price"]:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
 
             adds_html = f'''
             <h3 style="color:#28a745;">ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;">類型</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">類型</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th></tr>
                 {rows}
             </table>'''
 
@@ -312,11 +327,16 @@ class GmailNotifier:
                 sell_pnl_color = "#28a745" if sell_pnl and sell_pnl >= 0 else "#dc3545"
                 sell_pnl_str = f"{sell_pnl:+.1f}%" if sell_pnl is not None else "N/A"
 
-                buy_alpha = a.get("buy_alpha_1y")
+                buy_alpha_1y = a.get("buy_alpha_1y")
+                buy_alpha_3y = a.get("buy_alpha_3y")
                 alpha_str = ""
-                if buy_alpha is not None:
-                    alpha_emoji = "🟢" if buy_alpha > 0 else ("🟡" if buy_alpha > -20 else "🔴")
-                    alpha_str = f"{alpha_emoji} {buy_alpha:+.0f}%"
+                alpha_3y_str = ""
+                if buy_alpha_1y is not None:
+                    alpha_emoji = "🟢" if buy_alpha_1y > 0 else ("🟡" if buy_alpha_1y > -20 else "🔴")
+                    alpha_str = f"{alpha_emoji} {buy_alpha_1y:+.0f}%"
+                if buy_alpha_3y is not None:
+                    alpha_3y_emoji = "🟢" if buy_alpha_3y > 0 else ("🟡" if buy_alpha_3y > -20 else "🔴")
+                    alpha_3y_str = f"{alpha_3y_emoji} {buy_alpha_3y:+.0f}%"
 
                 rows += f'''<tr style="border-bottom:1px solid #ddd;">
                     <td style="padding:8px;color:#dc3545;">賣 {a["sell_symbol"]}</td>
@@ -327,11 +347,12 @@ class GmailNotifier:
                     <td>{a["buy_shares"]} 股</td>
                     <td>+{a["buy_momentum"]:.1f}%</td>
                     <td>{alpha_str}</td>
+                    <td>{alpha_3y_str}</td>
                 </tr>'''
             rotates_html = f'''
             <h3 style="color:#fd7e14;">ROTATE 建議（汰弱留強）({len(rotates)} 組)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;">賣出</th><th>股數</th><th>動能</th><th>P&L</th><th>買入</th><th>股數</th><th>動能</th><th>1Y</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">賣出</th><th>股數</th><th>動能</th><th>P&L</th><th>買入</th><th>股數</th><th>動能</th><th>1Y</th><th>3Y</th></tr>
                 {rows}
             </table>'''
 

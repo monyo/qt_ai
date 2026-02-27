@@ -240,6 +240,31 @@ def calculate_alpha_1y(symbol: str, benchmark: str = "SPY") -> float | None:
         return None
 
 
+def calculate_alpha_3y(symbol: str, benchmark: str = "SPY") -> float | None:
+    """計算標的過去 3 年相對於大盤的超額報酬
+
+    Args:
+        symbol: 股票代碼
+        benchmark: 基準指數（預設 SPY）
+
+    Returns:
+        超額報酬%（symbol 報酬 - benchmark 報酬），失敗回傳 None
+    """
+    try:
+        sym_df = yf.Ticker(symbol).history(period="3y")
+        bench_df = yf.Ticker(benchmark).history(period="3y")
+
+        if sym_df.empty or bench_df.empty or len(sym_df) < 600 or len(bench_df) < 600:
+            return None
+
+        sym_return = (sym_df['Close'].iloc[-1] / sym_df['Close'].iloc[0] - 1) * 100
+        bench_return = (bench_df['Close'].iloc[-1] / bench_df['Close'].iloc[0] - 1) * 100
+
+        return round(sym_return - bench_return, 1)
+    except Exception:
+        return None
+
+
 def calculate_alpha_batch(symbols: list, benchmark: str = "SPY", max_workers: int = 10) -> dict:
     """批次計算多檔標的的 1 年超額報酬
 
@@ -255,6 +280,32 @@ def calculate_alpha_batch(symbols: list, benchmark: str = "SPY", max_workers: in
 
     def fetch_one(sym):
         return sym, calculate_alpha_1y(sym, benchmark)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_one, sym): sym for sym in symbols}
+        for future in as_completed(futures):
+            sym, alpha = future.result()
+            if alpha is not None:
+                results[sym] = alpha
+
+    return results
+
+
+def calculate_alpha_3y_batch(symbols: list, benchmark: str = "SPY", max_workers: int = 10) -> dict:
+    """批次計算多檔標的的 3 年超額報酬
+
+    Args:
+        symbols: 股票代碼列表
+        benchmark: 基準指數
+        max_workers: 最大並行數
+
+    Returns:
+        dict: {symbol: alpha_3y}
+    """
+    results = {}
+
+    def fetch_one(sym):
+        return sym, calculate_alpha_3y(sym, benchmark)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(fetch_one, sym): sym for sym in symbols}

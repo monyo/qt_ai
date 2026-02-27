@@ -18,7 +18,7 @@ from src.risk import check_position_limit
 from src.premarket import generate_actions, generate_topup_suggestions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
-from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_trend_state_batch
+from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_alpha_3y_batch, calculate_trend_state_batch
 from src.notifier import GmailNotifier
 
 
@@ -163,13 +163,15 @@ def run_premarket(scan_tw=False):
     alpha_symbols = list(set(add_candidates + held_symbols))
     print(f"正在計算 {len(alpha_symbols)} 檔標的的 1 年超額報酬...")
     alpha_1y_map = calculate_alpha_batch(alpha_symbols)
+    print(f"正在計算 {len(add_candidates)} 檔 ADD 候選的 3 年超額報酬...")
+    alpha_3y_map = calculate_alpha_3y_batch(add_candidates)
 
     # 4.8 計算持倉趨勢狀態（V轉/倒V/盤整）
     print(f"正在計算 {len(held_symbols)} 檔持倉的趨勢狀態...")
     trend_state_map = calculate_trend_state_batch(held_symbols)
 
     # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態）
-    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map)
+    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map)
 
     # 5.5 增持參考（倉位偏小 + 動能強 + 趨勢轉強）
     total_value_for_topup = portfolio.get("cash", 0) + sum(
@@ -177,7 +179,7 @@ def run_premarket(scan_tw=False):
         for sym, pos in positions.items()
     )
     topup_suggestions = generate_topup_suggestions(
-        portfolio, current_prices, momentum_ranks, alpha_1y_map, trend_state_map, total_value_for_topup
+        portfolio, current_prices, momentum_ranks, alpha_1y_map, trend_state_map, total_value_for_topup, alpha_3y_map
     )
 
     # 5.6 篩選「安全」TOPUP，計算補到等權重所需股數
@@ -321,12 +323,16 @@ def run_premarket(scan_tw=False):
         print("--- ADD / TOPUP 建議 ---")
         for a in adds:
             momentum_str = f"動能: +{a.get('momentum', 0):.1f}%"
-            alpha = a.get('alpha_1y')
-            if alpha is not None:
-                alpha_emoji = "🟢" if alpha > 0 else ("🟡" if alpha > -20 else "🔴")
-                alpha_str = f"  1Y vs SPY: {alpha:+.0f}% {alpha_emoji}"
+            alpha_1y = a.get('alpha_1y')
+            alpha_3y = a.get('alpha_3y')
+            if alpha_1y is not None:
+                alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
+                alpha_str = f"  1Y: {alpha_1y:+.0f}% {alpha_emoji}"
             else:
                 alpha_str = ""
+            if alpha_3y is not None:
+                alpha_3y_emoji = "🟢" if alpha_3y > 0 else ("🟡" if alpha_3y > -20 else "🔴")
+                alpha_str += f"  3Y: {alpha_3y:+.0f}% {alpha_3y_emoji}"
             shares_str = str(a['suggested_shares'])
             post_rotate_shares = a.get('suggested_shares_post_rotate')
             if post_rotate_shares is not None and post_rotate_shares != a['suggested_shares']:
@@ -347,12 +353,16 @@ def run_premarket(scan_tw=False):
         print("--- ROTATE (汰弱留強) ---")
         for a in rotates:
             sell_pnl = f"{a['sell_pnl_pct']:+.1f}%" if a.get("sell_pnl_pct") is not None else "N/A"
-            buy_alpha = a.get('buy_alpha_1y')
-            if buy_alpha is not None:
-                alpha_emoji = "🟢" if buy_alpha > 0 else ("🟡" if buy_alpha > -20 else "🔴")
-                alpha_str = f"1Y: {buy_alpha:+.0f}% {alpha_emoji}"
+            buy_alpha_1y = a.get('buy_alpha_1y')
+            buy_alpha_3y = a.get('buy_alpha_3y')
+            if buy_alpha_1y is not None:
+                alpha_emoji = "🟢" if buy_alpha_1y > 0 else ("🟡" if buy_alpha_1y > -20 else "🔴")
+                alpha_str = f"1Y: {buy_alpha_1y:+.0f}% {alpha_emoji}"
             else:
                 alpha_str = ""
+            if buy_alpha_3y is not None:
+                alpha_3y_emoji = "🟢" if buy_alpha_3y > 0 else ("🟡" if buy_alpha_3y > -20 else "🔴")
+                alpha_str += f"  3Y: {buy_alpha_3y:+.0f}% {alpha_3y_emoji}"
             print(f"  賣 {a['sell_symbol']:<6} {a['sell_shares']} 股 (動能: {a['sell_momentum']:+.1f}%, P&L: {sell_pnl})")
             print(f"  → 買 {a['buy_symbol']:<6} {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
             print(f"       動能差: +{a['momentum_diff']:.0f}%  {a['reason']}")
