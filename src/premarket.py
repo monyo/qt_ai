@@ -182,6 +182,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
 
         # 策略 B: 集中火力
         # 計算實際要買入的檔數 (最多5檔)
+        ADD_BACKUP = 3  # 額外備選數，供用戶替換 1Y/3Y alpha 差的標的
         num_to_add = min(5, available_slots, len(buy_candidates))
 
         # 根據實際要買的檔數來決定單一部位大小
@@ -190,8 +191,9 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         else:
             position_size = 0
 
-        # 已經按動能排序，提出建議
-        for m in buy_candidates[:num_to_add]:
+        # 已經按動能排序，提出建議（主要候選 + 備選）
+        total_show = min(num_to_add + ADD_BACKUP, len(buy_candidates))
+        for idx, m in enumerate(buy_candidates[:total_show]):
             action_id += 1
             symbol = m["symbol"]
             momentum = m["momentum"]
@@ -200,6 +202,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             price = current_prices.get(symbol, 0)
             alpha_1y = alpha_1y_map.get(symbol)
             alpha_3y = alpha_3y_map.get(symbol)
+            is_backup = idx >= num_to_add
 
             if price > 0 and position_size > 0:
                 suggested_shares = math.floor(position_size / price)
@@ -208,7 +211,9 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
 
             # 組裝原因（加入警示）
             reason = f"動能排名 #{rank}（+{momentum:.1f}%）"
-            if suggested_shares == 0:
+            if is_backup:
+                reason = f"[備選] {reason}"
+            if suggested_shares == 0 and not is_backup:
                 reason += "（現金不足）"
             if rsi is not None and rsi > RSI_EXTREME:
                 reason += f" 🔴 RSI {rsi:.0f} 極度超買"
@@ -221,13 +226,14 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "id": action_id,
                 "action": "ADD",
                 "symbol": symbol,
-                "suggested_shares": suggested_shares,
+                "suggested_shares": 0 if is_backup else suggested_shares,
                 "current_price": price,
                 "momentum": momentum,
                 "rsi": rsi,
                 "momentum_rank": rank,
                 "alpha_1y": alpha_1y,
                 "alpha_3y": alpha_3y,
+                "is_backup": is_backup,
                 "reason": reason,
                 "source": "momentum",
                 "status": "pending",

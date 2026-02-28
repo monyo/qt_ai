@@ -76,7 +76,8 @@ class GmailNotifier:
         # 分類 actions
         exits = [a for a in actions if a["action"] == "EXIT"]
         holds = [a for a in actions if a["action"] == "HOLD"]
-        adds = [a for a in actions if a["action"] == "ADD"]
+        adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
+        backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
 
         if exits:
             lines.append(f"EXIT 建議 ({len(exits)} 檔):")
@@ -100,8 +101,8 @@ class GmailNotifier:
             lines.append("")
 
         safe_topups = data.get("safe_topups", [])
-        if adds or safe_topups:
-            lines.append(f"ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持):")
+        if adds or safe_topups or backup_adds:
+            lines.append(f"ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持 + {len(backup_adds)} 備選):")
             for a in adds:
                 momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
                 rank = a.get("momentum_rank", "?")
@@ -133,6 +134,20 @@ class GmailNotifier:
                 momentum = f"+{s.get('momentum', 0):.1f}%(#{s.get('momentum_rank', '?')})"
                 alpha_str = f"  1Y: {s['alpha_1y']:+.0f}%" if s.get("alpha_1y") is not None else ""
                 lines.append(f"  [增持] {s['symbol']:<6} +{s['topup_shares']} 股 @ ${s['current_price']:.2f}  {momentum}  {s['current_weight_pct']:.1f}%→等權重  🟢 安全{alpha_str}")
+            if backup_adds:
+                lines.append("  [備選 — 可替換 1Y/3Y alpha 差的主要候選]")
+                for a in backup_adds:
+                    momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
+                    alpha_1y = a.get("alpha_1y")
+                    alpha_3y = a.get("alpha_3y")
+                    alpha_str = ""
+                    if alpha_1y is not None:
+                        alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
+                        alpha_str = f"  1Y: {alpha_1y:+.0f}% {alpha_emoji}"
+                    if alpha_3y is not None:
+                        alpha_3y_emoji = "🟢" if alpha_3y > 0 else ("🟡" if alpha_3y > -20 else "🔴")
+                        alpha_str += f"  3Y: {alpha_3y:+.0f}% {alpha_3y_emoji}"
+                    lines.append(f"  [備#{a.get('momentum_rank', '?')}] {a['symbol']:<6} @ ${a.get('current_price', 0):.2f}  {momentum}{alpha_str}")
             lines.append("")
 
         # ROTATE 建議（汰弱留強）
@@ -234,7 +249,8 @@ class GmailNotifier:
         # Actions 表格
         exits = [a for a in actions if a["action"] == "EXIT"]
         holds = [a for a in actions if a["action"] == "HOLD"]
-        adds = [a for a in actions if a["action"] == "ADD"]
+        adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
+        backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
 
         exits_html = ""
         if exits:
@@ -267,7 +283,7 @@ class GmailNotifier:
 
         safe_topups = data.get("safe_topups", [])
         adds_html = ""
-        if adds or safe_topups:
+        if adds or safe_topups or backup_adds:
             rows = ""
             for a in adds:
                 momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
@@ -310,8 +326,20 @@ class GmailNotifier:
                     alpha_html = f"<td>{alpha_emoji} {s['alpha_1y']:+.0f}%</td><td></td>"
                 rows += f'<tr style="background:#f0fff0;"><td style="color:#28a745;">增持</td><td><strong>{s["symbol"]}</strong></td><td>+{s["topup_shares"]} 股<br><span style="font-size:11px;color:#28a745;">{s["current_weight_pct"]:.1f}%→等權重 🟢</span></td><td>${s["current_price"]:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
 
+            for a in backup_adds:
+                momentum = f"+{a.get('momentum', 0):.1f}%"
+                price = a.get("current_price", 0)
+                alpha_html = "<td></td><td></td>"
+                alpha_1y = a.get("alpha_1y")
+                alpha_3y = a.get("alpha_3y")
+                if alpha_1y is not None:
+                    alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
+                    alpha_3y_str = f"<td>{'🟢' if alpha_3y and alpha_3y > 0 else ('🟡' if alpha_3y and alpha_3y > -20 else '🔴')} {alpha_3y:+.0f}%</td>" if alpha_3y is not None else "<td></td>"
+                    alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>{alpha_3y_str}"
+                rows += f'<tr style="background:#fff9e6;"><td style="color:#856404;">備#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td style="color:#6c757d;font-size:11px;">備選參考</td><td>${price:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
+
             adds_html = f'''
-            <h3 style="color:#28a745;">ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持)</h3>
+            <h3 style="color:#28a745;">ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持 + {len(backup_adds)} 備選)</h3>
             <table style="border-collapse:collapse;width:100%;">
                 <tr style="background:#f8f9fa;"><th style="padding:8px;">類型</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th></tr>
                 {rows}

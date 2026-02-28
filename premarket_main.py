@@ -282,7 +282,8 @@ def run_premarket(scan_tw=False):
     # 分類印出
     exits = [a for a in actions if a["action"] == "EXIT"]
     holds = [a for a in actions if a["action"] == "HOLD"]
-    adds = [a for a in actions if a["action"] == "ADD"]
+    adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
+    backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
 
     if exits:
         print("--- EXIT (建議出場) ---")
@@ -319,7 +320,7 @@ def run_premarket(scan_tw=False):
             print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}")
         print()
 
-    if adds or safe_topups:
+    if adds or safe_topups or backup_adds:
         print("--- ADD / TOPUP 建議 ---")
         for a in adds:
             momentum_str = f"動能: +{a.get('momentum', 0):.1f}%"
@@ -339,6 +340,22 @@ def run_premarket(scan_tw=False):
                 shares_str += f" (ROTATE後 {post_rotate_shares} 股)"
             print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']:<6} 建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
             print(f"         原因: {a['reason']}")
+        if backup_adds:
+            print("  --- 備選（可替換 1Y/3Y alpha 差的主要候選）---")
+            for a in backup_adds:
+                momentum_str = f"動能: +{a.get('momentum', 0):.1f}%"
+                alpha_1y = a.get('alpha_1y')
+                alpha_3y = a.get('alpha_3y')
+                if alpha_1y is not None:
+                    alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
+                    alpha_str = f"  1Y: {alpha_1y:+.0f}% {alpha_emoji}"
+                else:
+                    alpha_str = ""
+                if alpha_3y is not None:
+                    alpha_3y_emoji = "🟢" if alpha_3y > 0 else ("🟡" if alpha_3y > -20 else "🔴")
+                    alpha_str += f"  3Y: {alpha_3y:+.0f}% {alpha_3y_emoji}"
+                print(f"  [備#{a.get('momentum_rank', '?')}] {a['symbol']:<6} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
+                print(f"           原因: {a['reason']}")
         for s in safe_topups:
             weight_after = (s["current_price"] * (s["shares"] + s["topup_shares"])) / total_value_for_topup * 100
             momentum_str = f"動能: +{s['momentum']:.1f}%(#{s['momentum_rank']})"
