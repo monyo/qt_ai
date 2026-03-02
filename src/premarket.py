@@ -192,8 +192,16 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             position_size = 0
 
         # 已經按動能排序，提出建議（主要候選 + 備選）
-        total_show = min(num_to_add + ADD_BACKUP, len(buy_candidates))
-        for idx, m in enumerate(buy_candidates[:total_show]):
+        # 備選過濾：3Y alpha 必須 >= 0，才是有效替代品
+        primary_candidates = buy_candidates[:num_to_add]
+        backup_pool = buy_candidates[num_to_add:]
+        valid_backups = [
+            m for m in backup_pool
+            if alpha_3y_map.get(m["symbol"]) is None or alpha_3y_map.get(m["symbol"]) >= 0
+        ][:ADD_BACKUP]
+        candidates_to_show = [(m, False) for m in primary_candidates] + [(m, True) for m in valid_backups]
+
+        for m, is_backup in candidates_to_show:
             action_id += 1
             symbol = m["symbol"]
             momentum = m["momentum"]
@@ -202,7 +210,6 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             price = current_prices.get(symbol, 0)
             alpha_1y = alpha_1y_map.get(symbol)
             alpha_3y = alpha_3y_map.get(symbol)
-            is_backup = idx >= num_to_add
 
             if price > 0 and position_size > 0:
                 suggested_shares = math.floor(position_size / price)
