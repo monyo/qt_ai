@@ -251,6 +251,111 @@ class GmailNotifier:
         holds = [a for a in actions if a["action"] == "HOLD"]
         adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
         backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
+        rotates_sell = {a["sell_symbol"] for a in actions if a["action"] == "ROTATE"}
+        safe_topup_syms = {s["symbol"] for s in data.get("safe_topups", [])}
+
+        # === 持倉總覽表 ===
+        # 排序：EXIT 優先，再依動能升序（弱的在前），core 放最後
+        def portfolio_sort_key(a):
+            if a["action"] == "EXIT":
+                return (0, a.get("pnl_pct") or 0)
+            if a.get("source") == "core_hold":
+                return (2, 0)
+            return (1, a.get("momentum") or 0)
+
+        portfolio_rows_data = sorted(exits + holds, key=portfolio_sort_key)
+        portfolio_rows = ""
+        for a in portfolio_rows_data:
+            sym = a["symbol"]
+            pnl = a.get("pnl_pct")
+            momentum = a.get("momentum")
+            rank = a.get("momentum_rank")
+            ts = a.get("trend_state") or {}
+            trend_state = ts.get("state", "")
+            price = a.get("current_price", 0)
+            avg_price = a.get("avg_price", 0)
+            stop_price = round(avg_price * 0.85, 2) if avg_price else 0
+
+            # 決定 Action 標籤
+            if a["action"] == "EXIT":
+                action_label = '<span style="color:#dc3545;font-weight:bold;">⛔ EXIT</span>'
+            elif sym in rotates_sell:
+                action_label = '<span style="color:#fd7e14;font-weight:bold;">🔄 ROTATE</span>'
+            elif sym in safe_topup_syms:
+                action_label = '<span style="color:#6f42c1;font-weight:bold;">📈 TOPUP</span>'
+            elif a.get("source") == "core_hold":
+                action_label = '<span style="color:#6c757d;">🔒 CORE</span>'
+            else:
+                action_label = '<span style="color:#28a745;">✅ HOLD</span>'
+
+            # 趨勢標籤
+            if trend_state == "轉強":
+                trend_label = '<span style="color:#28a745;">↗️轉強</span>'
+            elif trend_state == "轉弱":
+                trend_label = '<span style="color:#dc3545;">↘️轉弱</span>'
+            else:
+                trend_label = '<span style="color:#6c757d;">→盤整</span>' if trend_state == "盤整" else ""
+
+            # 動能欄
+            if momentum is not None:
+                m_color = "#28a745" if momentum > 0 else "#dc3545"
+                rank_str = f"#{rank} " if rank else ""
+                momentum_str = f'<span style="color:{m_color};">{rank_str}{momentum:+.1f}%</span>'
+            else:
+                momentum_str = "—"
+
+            # P&L 欄
+            if pnl is not None:
+                pnl_color = "#28a745" if pnl >= 0 else "#dc3545"
+                pnl_str = f'<span style="color:{pnl_color};">{pnl:+.1f}%</span>'
+            else:
+                pnl_str = "—"
+
+            # 列底色邏輯
+            if a["action"] == "EXIT":
+                row_bg = "background:#f8d7da;"          # 紅：觸發出場
+            elif sym in rotates_sell:
+                row_bg = "background:#ffe8cc;"          # 橘：建議 ROTATE 賣出
+            elif momentum is not None and momentum < 0:
+                row_bg = "background:#fff3cd;"          # 黃：動能轉負
+            elif pnl is not None and pnl < -3 and price < stop_price * 1.05:
+                row_bg = "background:#fff3cd;"          # 黃：接近停損
+            elif sym in safe_topup_syms:
+                row_bg = "background:#f0e6ff;"          # 淺紫：安全加碼機會
+            elif momentum is not None and momentum > 15 and trend_state == "轉強":
+                row_bg = "background:#d4edda;"          # 綠：動能強 + 趨勢佳
+            else:
+                row_bg = ""
+
+            portfolio_rows += f'''<tr style="{row_bg}border-bottom:1px solid #eee;">
+                <td style="padding:6px 8px;font-weight:bold;">{sym}</td>
+                <td style="padding:6px 8px;text-align:center;">{a.get("shares", 0)}</td>
+                <td style="padding:6px 8px;text-align:right;">${price:.2f}</td>
+                <td style="padding:6px 8px;text-align:right;">${avg_price:.2f}</td>
+                <td style="padding:6px 8px;text-align:right;">{pnl_str}</td>
+                <td style="padding:6px 8px;text-align:center;">{momentum_str}</td>
+                <td style="padding:6px 8px;text-align:center;">{trend_label}</td>
+                <td style="padding:6px 8px;text-align:center;">{action_label}</td>
+            </tr>'''
+
+        portfolio_html = f'''
+        <h3 style="margin-top:20px;">📋 持倉總覽</h3>
+        <table style="border-collapse:collapse;width:100%;font-size:13px;">
+            <tr style="background:#343a40;color:#fff;">
+                <th style="padding:7px 8px;text-align:left;">標的</th>
+                <th style="padding:7px 8px;">股數</th>
+                <th style="padding:7px 8px;">現價</th>
+                <th style="padding:7px 8px;">成本</th>
+                <th style="padding:7px 8px;">P&amp;L</th>
+                <th style="padding:7px 8px;">動能</th>
+                <th style="padding:7px 8px;">趨勢</th>
+                <th style="padding:7px 8px;">建議</th>
+            </tr>
+            {portfolio_rows}
+        </table>
+        <p style="font-size:11px;color:#6c757d;margin:4px 0 0 0;">
+            🔴 EXIT &nbsp;|&nbsp; 🟠 ROTATE/動能負 &nbsp;|&nbsp; 🟡 接近停損 &nbsp;|&nbsp; 🟢 動能強+轉強 &nbsp;|&nbsp; 🟣 安全TOPUP機會
+        </p>'''
 
         exits_html = ""
         if exits:
@@ -473,6 +578,7 @@ class GmailNotifier:
 
             {alerts_html}
             {watch_html}
+            {portfolio_html}
             {exits_html}
             {holds_html}
             {adds_html}
