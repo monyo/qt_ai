@@ -36,7 +36,9 @@ class GmailNotifier:
         portfolio = actions_data.get("portfolio_snapshot", {})
         total_value = portfolio.get("total_value", 0)
 
-        subject = f"盤前報告 {actions_data['date']} | 投組 ${total_value:,.0f}"
+        regime = actions_data.get("regime_status", {})
+        regime_tag = " 🔴BEAR" if not regime.get("is_bull", True) else ""
+        subject = f"盤前報告 {actions_data['date']} | 投組 ${total_value:,.0f}{regime_tag}"
         text_body = self._format_text_report(actions_data)
         html_body = self._format_html_report(actions_data)
 
@@ -48,6 +50,7 @@ class GmailNotifier:
         sector = data.get("sector_status", {})
         actions = data.get("actions", [])
 
+        regime = data.get("regime_status", {})
         lines = [
             f"盤前報告 {data['date']}",
             f"版本 {data.get('version', 'N/A')}",
@@ -57,6 +60,17 @@ class GmailNotifier:
             f"現金:     ${portfolio.get('cash', 0):,.2f}",
             f"個股:     {portfolio.get('individual_count', 0)}/30 檔",
         ]
+
+        # 市場體制
+        if regime:
+            if regime.get("is_bull", True):
+                pct = f"+{regime['pct_vs_ma200']:.1f}%" if regime.get("pct_vs_ma200") is not None else ""
+                lines.append(f"市場體制: 🟢 BULL  SPY ${regime.get('spy_price')} > MA200 ${regime.get('ma200')} ({pct})")
+            else:
+                pct = f"{regime['pct_vs_ma200']:.1f}%" if regime.get("pct_vs_ma200") is not None else ""
+                lines.append(f"市場體制: 🔴 BEAR  SPY ${regime.get('spy_price')} < MA200 ${regime.get('ma200')} ({pct})")
+                lines.append("  ⚠️  ADD / ROTATE 已暫停，等 SPY 站回 MA200")
+        lines.append("")
 
         # 年度 P&L
         yearly = portfolio.get("yearly_pnl")
@@ -239,6 +253,17 @@ class GmailNotifier:
             sign = "+" if yearly["pnl_amount"] >= 0 else ""
             color = "#28a745" if yearly["pnl_amount"] >= 0 else "#dc3545"
             yearly_html = f'<tr><td>年度 P&L</td><td style="color:{color}">{sign}${yearly["pnl_amount"]:,.2f} ({sign}{yearly["pnl_pct"]:.1f}%)</td></tr>'
+
+        # 市場體制橫幅
+        regime = data.get("regime_status", {})
+        regime_html = ""
+        if regime:
+            if regime.get("is_bull", True):
+                pct = f"+{regime['pct_vs_ma200']:.1f}%" if regime.get("pct_vs_ma200") is not None else ""
+                regime_html = f'<div style="background:#d4edda;padding:10px;border-radius:5px;margin:10px 0;border-left:4px solid #28a745;"><strong>🟢 市場體制: BULL</strong> &nbsp; SPY ${regime.get("spy_price")} &gt; MA200 ${regime.get("ma200")} ({pct})</div>'
+            else:
+                pct = f"{regime['pct_vs_ma200']:.1f}%" if regime.get("pct_vs_ma200") is not None else ""
+                regime_html = f'<div style="background:#f8d7da;padding:10px;border-radius:5px;margin:10px 0;border-left:4px solid #dc3545;"><strong>🔴 市場體制: BEAR</strong> &nbsp; SPY ${regime.get("spy_price")} &lt; MA200 ${regime.get("ma200")} ({pct})<br><span style="color:#721c24;">⚠️ ADD / ROTATE 已暫停，等 SPY 站回 MA200 再開放新倉</span></div>'
 
         # 板塊警告
         alerts_html = ""
@@ -576,6 +601,7 @@ class GmailNotifier:
                 {yearly_html}
             </table>
 
+            {regime_html}
             {alerts_html}
             {watch_html}
             {portfolio_html}

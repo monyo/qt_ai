@@ -9,8 +9,8 @@ ROTATE_MOMENTUM_DIFF = 10      # 動能差距門檻 (%)，從 20% 降至 10%
 ROTATE_HOLDING_DAYS_MIN = 30   # 最少持有天數，從 60 天降至 30 天
 
 
-def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None, trend_state_map=None, alpha_3y_map=None):
-    """盤前決策引擎（動能策略 + 三層出場 + 趨勢狀態）
+def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None, trend_state_map=None, alpha_3y_map=None, market_regime="BULL"):
+    """盤前決策引擎（動能策略 + 三層出場 + 趨勢狀態 + 市場體制）
 
     Args:
         portfolio: 持倉狀態 dict
@@ -20,6 +20,8 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         alpha_1y_map: {symbol: alpha_1y} 1 年超額報酬（vs SPY）
         trend_state_map: {symbol: {bounce_pct, from_high_pct, state}} 趨勢狀態
         alpha_3y_map: {symbol: alpha_3y} 3 年超額報酬（vs SPY）
+        market_regime: "BULL" 或 "BEAR"（SPY vs MA200）
+                       BEAR 時停止產出 ADD / ROTATE，只做 HOLD / EXIT
 
     Returns:
         actions: list of action dicts
@@ -147,6 +149,10 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "source": "momentum",
                 "status": "auto",
             })
+
+    # === 3. 新增買入候選（依動能排名，BEAR 市場暫停） ===
+    if market_regime == "BEAR":
+        return actions  # BEAR 體制：只保留 HOLD / EXIT，不建議新增或換股
 
     # === 3. 新增買入候選（依動能排名） ===
     # 計算預估可用現金（假設 EXIT 全部執行，取 85% 避免價差）

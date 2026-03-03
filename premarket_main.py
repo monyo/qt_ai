@@ -22,6 +22,37 @@ from src.momentum import rank_by_momentum, print_momentum_report, calculate_alph
 from src.notifier import GmailNotifier
 
 
+def get_spy_regime():
+    """檢查 SPY 是否高於 200 日均線，判斷當前市場體制
+
+    Returns:
+        dict: {
+            "regime": "BULL" or "BEAR",
+            "is_bull": bool,
+            "spy_price": float,
+            "ma200": float,
+            "pct_vs_ma200": float,   # SPY 高於/低於 MA200 的百分比
+        }
+    """
+    try:
+        df = yf.Ticker("SPY").history(period="1y")
+        if len(df) < 200:
+            return {"regime": "BULL", "is_bull": True, "spy_price": None, "ma200": None, "pct_vs_ma200": None}
+        spy_price = round(df["Close"].iloc[-1], 2)
+        ma200 = round(df["Close"].rolling(200).mean().iloc[-1], 2)
+        pct = round((spy_price - ma200) / ma200 * 100, 2)
+        is_bull = spy_price > ma200
+        return {
+            "regime": "BULL" if is_bull else "BEAR",
+            "is_bull": is_bull,
+            "spy_price": spy_price,
+            "ma200": ma200,
+            "pct_vs_ma200": pct,
+        }
+    except Exception:
+        return {"regime": "BULL", "is_bull": True, "spy_price": None, "ma200": None, "pct_vs_ma200": None}
+
+
 def fetch_ma200_prices(symbols):
     """取得多檔標的的 MA200 值
 
@@ -123,7 +154,16 @@ def run_premarket(scan_tw=False):
     individual = get_individual_count(portfolio)
     print(f"持倉：{len(positions)} 檔（個股 {individual}/30），現金 ${portfolio.get('cash', 0):,.2f}\n")
 
-    # 1.5 板塊相對強弱檢查
+    # 1.5 市場體制偵測（SPY vs MA200）
+    print("正在檢查市場體制（SPY MA200）...")
+    regime = get_spy_regime()
+    if regime["spy_price"] is not None:
+        regime_label = f"SPY ${regime['spy_price']} vs MA200 ${regime['ma200']} ({regime['pct_vs_ma200']:+.1f}%)"
+    else:
+        regime_label = "資料無法取得，預設 BULL"
+    print(f"  市場體制: {regime['regime']}  {regime_label}")
+
+    # 1.6 板塊相對強弱檢查
     print("正在檢查板塊相對強弱...")
     sector_summary = get_sector_summary(lookback_days=5)
     held_symbols = list(positions.keys())
@@ -170,8 +210,8 @@ def run_premarket(scan_tw=False):
     print(f"正在計算 {len(held_symbols)} 檔持倉的趨勢狀態...")
     trend_state_map = calculate_trend_state_batch(held_symbols)
 
-    # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態）
-    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map)
+    # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態 + 市場體制）
+    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map, market_regime=regime["regime"])
 
     # 5.5 增持參考（倉位偏小 + 動能強 + 趨勢轉強）
     total_value_for_topup = portfolio.get("cash", 0) + sum(
@@ -232,6 +272,7 @@ def run_premarket(scan_tw=False):
             "individual_count": individual,
             "yearly_pnl": yearly_pnl,
         },
+        "regime_status": regime,
         "sector_status": {
             "status": sector_summary["status"],
             "alerts": [a["message"] for a in sector_summary["alerts"]],
@@ -259,6 +300,17 @@ def run_premarket(scan_tw=False):
     else:
         print(f"  {current_year}年度:  (尚無快照，執行 --snapshot 建立)")
     print(f"{'='*60}")
+
+    # 市場體制警告
+    if regime["is_bull"]:
+        bull_str = f"+{regime['pct_vs_ma200']:.1f}%" if regime["pct_vs_ma200"] is not None else ""
+        print(f"\n🟢 市場體制: BULL  SPY ${regime['spy_price']} > MA200 ${regime['ma200']} ({bull_str})")
+    else:
+        bear_str = f"{regime['pct_vs_ma200']:.1f}%" if regime["pct_vs_ma200"] is not None else ""
+        print(f"\n{'='*60}")
+        print(f"  🔴 市場體制: BEAR  SPY ${regime['spy_price']} < MA200 ${regime['ma200']} ({bear_str})")
+        print(f"  ⚠️  ADD 與 ROTATE 建議已暫停 — 等 SPY 站回 MA200 再開放")
+        print(f"{'='*60}")
 
     # 板塊健康狀態
     print(f"\n--- 板塊相對強弱 (過去5日) {sector_summary['status_emoji']} ---")
