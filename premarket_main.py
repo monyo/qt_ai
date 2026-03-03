@@ -41,13 +41,13 @@ def get_spy_regime():
         spy_price = round(df["Close"].iloc[-1], 2)
         ma200 = round(df["Close"].rolling(200).mean().iloc[-1], 2)
         pct = round((spy_price - ma200) / ma200 * 100, 2)
-        is_bull = spy_price > ma200
+        is_bull = bool(spy_price > ma200)
         return {
             "regime": "BULL" if is_bull else "BEAR",
             "is_bull": is_bull,
-            "spy_price": spy_price,
-            "ma200": ma200,
-            "pct_vs_ma200": pct,
+            "spy_price": float(spy_price),
+            "ma200": float(ma200),
+            "pct_vs_ma200": float(pct),
         }
     except Exception:
         return {"regime": "BULL", "is_bull": True, "spy_price": None, "ma200": None, "pct_vs_ma200": None}
