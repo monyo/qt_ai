@@ -66,6 +66,43 @@ def check_fixed_stop(positions, current_prices, threshold=-0.15):
     return triggered
 
 
+def check_trailing_stop(positions, current_prices, trailing_pct=0.25):
+    """檢查持倉是否觸發追蹤停損（從持倉最高點回落指定比例）
+
+    回測驗證（10Y S&P500 全市場）：
+    - 無追蹤停損：CAGR +23.1%，MDD -31.4%，Calmar 0.734
+    - 追蹤 -25%：CAGR +23.2%，MDD -26.4%，Calmar 0.882（最佳門檻）
+    - -20% 至 -30% 效果相近，-25% 為最佳敏感度掃描結果
+
+    Args:
+        positions: 持倉 dict（每個 pos 需含 high_since_entry）
+        current_prices: {symbol: price}
+        trailing_pct: 從最高點回落觸發比例（預設 0.25 = -25%）
+
+    Returns:
+        list of dict: [{"symbol": str, "high_since_entry": float,
+                        "current_price": float, "from_high_pct": float}, ...]
+    """
+    triggered = []
+    for symbol, pos in positions.items():
+        if pos.get("core", False):
+            continue
+        price = current_prices.get(symbol)
+        high_price = pos.get("high_since_entry")
+        if price is None or high_price is None or high_price <= 0:
+            continue
+        from_high = (price - high_price) / high_price
+        if from_high <= -trailing_pct:
+            triggered.append({
+                "symbol": symbol,
+                "high_since_entry": high_price,
+                "current_price": price,
+                "from_high_pct": round(from_high * 100, 2),
+                "reason": "trailing_stop",
+            })
+    return triggered
+
+
 def check_ma200_stop(positions, current_prices, ma200_prices):
     """檢查持倉是否跌破 MA200
 
@@ -98,16 +135,18 @@ def check_ma200_stop(positions, current_prices, ma200_prices):
 
 
 def check_all_exit_conditions(positions, current_prices, ma200_prices,
-                               fixed_threshold=-0.15, hard_threshold=-0.35):
+                               fixed_threshold=-0.15, hard_threshold=-0.35,
+                               trailing_pct=0.25):
     """檢查所有出場條件，回傳需要出場的持倉
 
     優先順序：
     1. 固定停損（-15% from cost）
-    2. MA200 停損
-    3. 極端停損（-35% from cost，理論上不會觸發因為 -15% 先到）
+    2. 追蹤停損（從持倉最高點 -25%，回測 Calmar 0.882 vs 無追蹤 0.734）
+    3. MA200 停損
+    4. 極端停損（-35% from cost，備用防線）
 
     Returns:
-        dict: {symbol: {"reason": str, "details": dict}}
+        dict: {symbol: {"reason": str, "message": str, "details": dict}}
     """
     exits = {}
 
@@ -120,7 +159,17 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
             "details": item,
         }
 
-    # 2. MA200 停損（如果還沒被移動停利抓到）
+    # 2. 追蹤停損（從持倉最高點 -25%）
+    trailing_stops = check_trailing_stop(positions, current_prices, trailing_pct)
+    for item in trailing_stops:
+        if item["symbol"] not in exits:
+            exits[item["symbol"]] = {
+                "reason": "trailing_stop",
+                "message": f"追蹤停損觸發（最高 ${item['high_since_entry']:.2f}，回落 {item['from_high_pct']:.1f}%）",
+                "details": item,
+            }
+
+    # 3. MA200 停損
     ma200_stops = check_ma200_stop(positions, current_prices, ma200_prices)
     for item in ma200_stops:
         if item["symbol"] not in exits:
@@ -130,7 +179,7 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
                 "details": item,
             }
 
-    # 3. 極端停損（最後防線）
+    # 4. 極端停損（最後防線）
     hard_stops = check_stop_loss(positions, current_prices, hard_threshold)
     for item in hard_stops:
         if item["symbol"] not in exits:

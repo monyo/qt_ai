@@ -336,6 +336,22 @@ class GmailNotifier:
             else:
                 pnl_str = "—"
 
+            # 進場後高點 & 回落% 欄
+            high_price = a.get("high_since_entry")
+            if high_price and price and high_price > 0:
+                from_high = (price - high_price) / high_price * 100
+                high_str = f'${high_price:.2f}'
+                if from_high <= -20:
+                    fh_color, fh_icon = "#dc3545", "🔴"
+                elif from_high <= -10:
+                    fh_color, fh_icon = "#fd7e14", "🟡"
+                else:
+                    fh_color, fh_icon = "#6c757d", ""
+                from_high_str = f'<span style="color:{fh_color};">{fh_icon}{from_high:.0f}%</span>'
+            else:
+                high_str = "—"
+                from_high_str = "—"
+
             # 列底色邏輯
             if a["action"] == "EXIT":
                 row_bg = "background:#f8d7da;"          # 紅：觸發出場
@@ -358,6 +374,8 @@ class GmailNotifier:
                 <td style="padding:6px 8px;text-align:right;">${price:.2f}</td>
                 <td style="padding:6px 8px;text-align:right;">${avg_price:.2f}</td>
                 <td style="padding:6px 8px;text-align:right;">{pnl_str}</td>
+                <td style="padding:6px 8px;text-align:right;font-size:12px;color:#495057;">{high_str}</td>
+                <td style="padding:6px 8px;text-align:center;">{from_high_str}</td>
                 <td style="padding:6px 8px;text-align:center;">{momentum_str}</td>
                 <td style="padding:6px 8px;text-align:center;">{trend_label}</td>
                 <td style="padding:6px 8px;text-align:center;">{action_label}</td>
@@ -372,6 +390,8 @@ class GmailNotifier:
                 <th style="padding:7px 8px;">現價</th>
                 <th style="padding:7px 8px;">成本</th>
                 <th style="padding:7px 8px;">P&amp;L</th>
+                <th style="padding:7px 8px;">進場高點</th>
+                <th style="padding:7px 8px;">距高</th>
                 <th style="padding:7px 8px;">動能</th>
                 <th style="padding:7px 8px;">趨勢</th>
                 <th style="padding:7px 8px;">建議</th>

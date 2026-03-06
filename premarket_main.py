@@ -367,9 +367,18 @@ def run_premarket(scan_tw=False):
                     ts_str += f"(反彈{ts['bounce_pct']:+.0f}%)"
             else:
                 ts_str = ""
-            tag = "[core]" if a["source"] == "core_hold" else "      "
+            # 追蹤停損接近度（高點 -25% 觸發）
+            trail_str = ""
+            high_price = a.get('high_since_entry')
             price = a.get('current_price') or 0
-            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}")
+            if high_price and price and high_price > 0:
+                from_high = (price - high_price) / high_price * 100
+                if from_high <= -20:
+                    trail_str = f"  🔴追蹤{from_high:.0f}%"
+                elif from_high <= -10:
+                    trail_str = f"  🟡追蹤{from_high:.0f}%"
+            tag = "[core]" if a["source"] == "core_hold" else "      "
+            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}{trail_str}")
         print()
 
     if adds or safe_topups or backup_adds:
