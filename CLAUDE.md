@@ -32,8 +32,14 @@ python main.py
 python scanner_main.py
 
 # === 風控工具 ===
-# 停損策略回測比較
+# 停損策略回測比較（單股）
 python stop_loss_compare.py NVDA SHOP TSLA GOOG MU
+
+# 投組層級回測（6 種策略 + SPY B&H，10Y S&P500 全市場）
+python portfolio_backtest.py
+
+# 追蹤停損門檻敏感度掃描（-10% 至 -40%）
+python _trailing_sensitivity.py
 
 # 板塊相對強弱獨立檢查
 python -c "from src.sector_monitor import print_sector_report; print_sector_report()"
@@ -66,7 +72,7 @@ Quantitative stock scanning + position management system. Combines technical ana
 | Module | Role |
 |---|---|
 | `portfolio.py` | 持倉狀態管理。讀寫 `data/portfolio.json`（含 avg_price, cost_basis, transactions, favorite），白名單 `data/watchlist.json` |
-| `risk.py` | 風控：Fixed -15% 停損、MA200 停損、極端停損 -35%，持倉上限 30 檔 |
+| `risk.py` | 風控：Fixed -15% → 追蹤停損（高點 -25%）→ MA200 → 極端 -35%，持倉上限 30 檔 |
 | `premarket.py` | 決策引擎。產出 HOLD/EXIT/ADD/ROTATE actions，含 source 和 version 欄位 |
 | `data_loader.py` | yfinance 資料取得（含快取）、S&P 500 ticker 列表、批次最新報價 |
 | `strategy.py` | 技術訊號：buy when Price > MA60 AND RSI < 70, sell when Price < MA60 OR RSI > 85 |
@@ -81,10 +87,12 @@ Quantitative stock scanning + position management system. Combines technical ana
 ### Key design details
 
 - **Actions 狀態流**：`pending` → `confirmed`/`skipped`，HOLD 為 `auto`
-- **停損機制**（回測驗證 Fixed 優於 Trailing）：
+- **停損機制**（四層，依優先順序）：
   - Fixed -15%：從成本價計算，跌破即出場
+  - 追蹤停損 -25%：從進場後最高點（`high_since_entry`）回落 -25% 出場，回測 Calmar 0.882
   - MA200 停損：跌破 200 日均線
   - 極端停損 -35%：最後防線
+  - HOLD 欄位顯示距高接近度：🔴 > -20%、🟡 > -10%
 - **持倉保護層級**：
   - `core=true`：核心持倉（如 VOO），永遠只產出 HOLD
   - `favorite=true`：偏愛標的（如 TSLA, NVDA），不參與 ROTATE 換股
