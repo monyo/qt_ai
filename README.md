@@ -8,7 +8,8 @@
 |------|------|
 | **動能排名** | 混合動能 = 50% 短期(21天) + 50% 長期(252天)，回測 CAGR +62% |
 | **進場** | 動能排名前 5 名，等權重建倉 |
-| **出場** | Fixed -15% 停損 / MA200 停損 / 極端 -35% 停損 |
+| **出場** | Fixed -15% 停損 → 追蹤停損（高點 -25%）→ MA200 停損 → 極端 -35% 停損 |
+| **追蹤停損** | 從進場後最高點回落 -25% 即出場，回測 Calmar 0.882 vs 無追蹤 0.734 |
 | **汰弱留強** | 持倉動能 vs 候選動能差距 >10% 且持有 >30 天，建議 ROTATE |
 | **趨勢狀態** | ↗️轉強（V轉）/ ↘️轉弱（倒V）/ →盤整，回測月差 +2.14% |
 | **候選池** | S&P 500 全部成分股 + 白名單 + 現有持倉 |
@@ -57,7 +58,8 @@ python confirm_main.py 2026-02-19
 |------|------|
 | **盤前建議** | 載入持倉 → 混合動能排名 → 三層出場 → 趨勢狀態 → 輸出 actions |
 | **混合動能** | 50% 短期(21天) + 50% 長期(252天)，兼顧反應速度和穩定性 |
-| **三層出場** | Fixed -15% 停損 / MA200 停損 / 極端停損 -35% |
+| **四層出場** | Fixed -15% → 追蹤停損（高點 -25%）→ MA200 → 極端 -35%（優先順序依序檢查） |
+| **追蹤停損顯示** | HOLD 欄顯示距高回落 %：🔴 > -20%（接近觸發）、🟡 > -10% |
 | **趨勢狀態** | 偵測 V 轉回升、倒 V 見頂，補充動能指標的盲點 |
 | **汰弱留強** | 自動建議 ROTATE：賣出弱勢持倉，換入強勢候選；confirm 支援部分執行 |
 | **ADD/TOPUP 合併** | 安全增持標的（停損高於成本）合入 ADD 清單，同時顯示 ROTATE 後可買股數 |
@@ -123,7 +125,13 @@ python confirm_main.py 2026-02-19
 
 ### 回測工具
 ```bash
-# 停損策略比較
+# 投組層級回測（6 種策略 + SPY B&H 比較，10Y S&P500 全市場）
+python portfolio_backtest.py
+
+# 追蹤停損門檻敏感度掃描（-10% 至 -40%）
+python _trailing_sensitivity.py
+
+# 停損策略比較（單股）
 python stop_loss_compare.py NVDA SHOP TSLA GOOG MU
 
 # 趨勢狀態指標回測（V轉/倒V 的預測力驗證）
@@ -157,6 +165,8 @@ python -c "from src.sector_monitor import print_sector_report; print_sector_repo
 | `watchlist.json` | 白名單標的 |
 | `actions_YYYYMMDD.json` | 每日盤前建議（含 status: pending/confirmed/skipped） |
 | `snapshot_YYYY.json` | 年度快照（用於計算年度 P&L） |
+| `sector_map.json` | 板塊分類快取（GICS，供 portfolio_backtest.py 使用） |
+| `backtest_portfolio_YYYYMMDD.csv` | 投組層級回測結果 |
 | `*.csv` | 股票歷史數據快取 |
 
 ### portfolio.json 結構
@@ -193,7 +203,7 @@ python -c "from src.sector_monitor import print_sector_report; print_sector_repo
 - **核心持倉**：`core: true`（如 VOO）永遠只會 HOLD，不會建議賣出
 - **偏愛標的**：`favorite: true`（如 TSLA, NVDA）不參與 ROTATE 換股
 - **個股上限**：最多 30 檔（不含 core）
-- **三層停損**：Fixed -15% / MA200 / 極端 -35%（回測驗證 Fixed 優於 Trailing）
+- **四層出場**：Fixed -15% → 追蹤停損（高點 -25%）→ MA200 → 極端 -35%
 - **掃描範圍**：完整的 S&P 500 + 白名單
 
 ---
