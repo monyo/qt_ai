@@ -1,8 +1,11 @@
 """Gmail SMTP 通知模組"""
 import smtplib
 import os
+import datetime
+import pathlib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,7 +45,16 @@ class GmailNotifier:
         text_body = self._format_text_report(actions_data)
         html_body = self._format_html_report(actions_data)
 
-        return self._send_email(subject, text_body, html_body)
+        data_dir = pathlib.Path("data")
+        year = datetime.date.today().year
+        candidates = [
+            data_dir / "portfolio.json",
+            data_dir / f"snapshot_{year}.json",
+            data_dir / "watchlist.json",
+        ]
+        attachments = [(p.name, p.read_bytes()) for p in candidates if p.exists()]
+
+        return self._send_email(subject, text_body, html_body, attachments=attachments)
 
     def _format_text_report(self, data):
         """產生純文字報告"""
@@ -639,26 +651,44 @@ class GmailNotifier:
         '''
         return html
 
-    def _send_email(self, subject, text_body, html_body=None):
+    def _send_email(self, subject, text_body, html_body=None, attachments=None):
         """發送郵件
 
         Args:
             subject: 郵件主旨
             text_body: 純文字內容
             html_body: HTML 內容（可選）
+            attachments: list of (filename, bytes)，附件（可選）
 
         Returns:
             bool: 是否成功
         """
         try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = subject
-            msg["From"] = self.sender
-            msg["To"] = self.recipient
+            if attachments:
+                msg = MIMEMultipart("mixed")
+                msg["Subject"] = subject
+                msg["From"] = self.sender
+                msg["To"] = self.recipient
 
-            msg.attach(MIMEText(text_body, "plain", "utf-8"))
-            if html_body:
-                msg.attach(MIMEText(html_body, "html", "utf-8"))
+                body_part = MIMEMultipart("alternative")
+                body_part.attach(MIMEText(text_body, "plain", "utf-8"))
+                if html_body:
+                    body_part.attach(MIMEText(html_body, "html", "utf-8"))
+                msg.attach(body_part)
+
+                for filename, data in attachments:
+                    part = MIMEApplication(data, Name=filename)
+                    part["Content-Disposition"] = f'attachment; filename="{filename}"'
+                    msg.attach(part)
+            else:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"] = self.sender
+                msg["To"] = self.recipient
+
+                msg.attach(MIMEText(text_body, "plain", "utf-8"))
+                if html_body:
+                    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(self.sender, self.password)
