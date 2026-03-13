@@ -62,6 +62,7 @@ class StrategyConfig:
     sector_limit: bool = False  # 啟用板塊上限
     min_hold_days: int = 0      # ROTATE 最短持有天數（0 = 無限制）
     vol_stop_k: float = 0.0    # 波動率停損倍數（0 = 固定 -15%；>0 = k × 月波動率）
+    pyramid: bool = False       # 啟用金字塔加碼（分批進場 + 分批出場）
 
 
 STRATEGIES = [
@@ -71,6 +72,7 @@ STRATEGIES = [
     StrategyConfig("+SectorLimit",       sector_limit=True),
     StrategyConfig("+ProfitTake+Sector", profit_take=True, sector_limit=True),
     StrategyConfig("+All",               profit_take=True, trailing=True, sector_limit=True),
+    StrategyConfig("+Trailing+Pyramid",  trailing=True,    pyramid=True),
 ]
 
 
@@ -220,6 +222,31 @@ def _calc_stop(cfg: "StrategyConfig", vol_map: dict, sym: str, d_idx: int) -> fl
     return max(-VOL_STOP_CAP, min(-VOL_STOP_FLOOR, raw))
 
 
+def _make_tranche(shares: int, price: float, entry_idx: int, stop_pct: float) -> dict:
+    return {"shares": shares, "avg_price": price, "high_price": price,
+            "entry_idx": entry_idx, "stop_pct": stop_pct}
+
+
+def _make_position(shares: int, price: float, entry_idx: int, stop_pct: float,
+                   pyramid: bool = False) -> dict:
+    pos = {"shares": shares, "avg_price": price, "high_price": price,
+           "profit_taken": False, "entry_idx": entry_idx, "stop_pct": stop_pct}
+    if pyramid:
+        pos["tranches"] = [_make_tranche(shares, price, entry_idx, stop_pct)]
+    return pos
+
+
+def _sync_position(pos: dict) -> None:
+    """從 tranches 更新 position 的聚合欄位（shares / avg_price / high_price）"""
+    tranches = pos.get("tranches")
+    if not tranches:
+        return
+    total = sum(t["shares"] for t in tranches)
+    pos["shares"]    = total
+    pos["avg_price"] = sum(t["shares"] * t["avg_price"] for t in tranches) / total if total else 0
+    pos["high_price"]= max(t["high_price"] for t in tranches)
+
+
 class PortfolioSimulator:
     def __init__(self, config: StrategyConfig):
         self.cfg = config
@@ -249,51 +276,75 @@ class PortfolioSimulator:
                 p = px.get(sym, np.nan)
                 if np.isnan(p) or p <= 0:
                     continue
-                if p > pos["high_price"]:
-                    pos["high_price"] = p
+                if "tranches" in pos:
+                    for t in pos["tranches"]:
+                        if p > t["high_price"]:
+                            t["high_price"] = p
+                    pos["high_price"] = max(t["high_price"] for t in pos["tranches"])
+                else:
+                    if p > pos["high_price"]:
+                        pos["high_price"] = p
 
             # ── 每日 EXIT 檢查 ────────────────────────────────
-            to_exit = []
+            to_exit         = []   # 尚未收回現金，需在迴圈後處理
+            to_delete_only  = []   # 現金已在批次迴圈中收回，只需刪除
             for sym, pos in positions.items():
                 p = px.get(sym, np.nan)
                 if np.isnan(p) or p <= 0:
                     continue
 
-                # 1. Regime 出場（BEAR 市場）
+                # 1. Regime 出場（BEAR 市場）→ 全出
                 if not spy_bull[d_idx]:
                     to_exit.append(sym)
                     continue
 
-                # 2. Fixed / Vol stop（breakeven stop 若已停利，否則看策略）
-                pnl = (p - pos["avg_price"]) / pos["avg_price"]
-                threshold = 0.0 if pos.get("profit_taken") else pos.get("stop_pct", FIXED_STOP)
-                if pnl <= threshold:
-                    to_exit.append(sym)
-                    continue
-
-                # 3. Trailing stop（從最高點回落 -25%）
-                if cfg.trailing:
-                    from_high = (p - pos["high_price"]) / pos["high_price"]
-                    if from_high <= -TRAILING_PCT:
+                if "tranches" in pos:
+                    # 金字塔模式：每批獨立檢查，現金在此直接收回
+                    surviving = []
+                    for t in pos["tranches"]:
+                        pnl_t = (p - t["avg_price"]) / t["avg_price"]
+                        hit_fixed    = pnl_t <= t.get("stop_pct", FIXED_STOP)
+                        hit_trailing = cfg.trailing and (p - t["high_price"]) / t["high_price"] <= -TRAILING_PCT
+                        if hit_fixed or hit_trailing:
+                            cash += t["shares"] * p   # ← 現金已收回
+                            trade_count += 1
+                        else:
+                            surviving.append(t)
+                    if not surviving:
+                        to_delete_only.append(sym)   # 現金已收，只需刪除
+                    else:
+                        pos["tranches"] = surviving
+                        _sync_position(pos)
+                else:
+                    # 原始單批邏輯
+                    pnl = (p - pos["avg_price"]) / pos["avg_price"]
+                    threshold = 0.0 if pos.get("profit_taken") else pos.get("stop_pct", FIXED_STOP)
+                    if pnl <= threshold:
                         to_exit.append(sym)
                         continue
 
-                # 4. 停利（+30% 出半倉，僅觸發一次）
-                if cfg.profit_take and not pos.get("profit_taken"):
-                    if pnl >= PROFIT_TAKE_PCT:
-                        half = max(1, pos["shares"] // 2)
-                        cash += half * p
-                        pos["shares"] -= half
-                        pos["profit_taken"] = True
-                        trade_count += 1
-                        total_buy_val += 0  # sell-side 不計入 turnover
+                    if cfg.trailing:
+                        if (p - pos["high_price"]) / pos["high_price"] <= -TRAILING_PCT:
+                            to_exit.append(sym)
+                            continue
 
-            for sym in to_exit:
+                    # 停利（+30% 出半倉，僅觸發一次）
+                    if cfg.profit_take and not pos.get("profit_taken"):
+                        if pnl >= PROFIT_TAKE_PCT:
+                            half = max(1, pos["shares"] // 2)
+                            cash += half * p
+                            pos["shares"] -= half
+                            pos["profit_taken"] = True
+                            trade_count += 1
+
+            for sym in to_exit:          # 現金尚未收回
                 p = px.get(sym, positions[sym]["avg_price"])
                 if np.isnan(p) or p <= 0:
                     p = positions[sym]["avg_price"]
                 cash += positions[sym]["shares"] * p
                 trade_count += 1
+                del positions[sym]
+            for sym in to_delete_only:   # 現金已收，只刪除 position
                 del positions[sym]
 
             # ── 每週重平衡 ────────────────────────────────────
@@ -346,14 +397,11 @@ class PortfolioSimulator:
                                 cost = shares * p_buy
                                 cash -= cost
                                 total_buy_val += cost
-                                positions[cand_sym] = {
-                                    "shares": shares,
-                                    "avg_price": p_buy,
-                                    "high_price": p_buy,
-                                    "profit_taken": False,
-                                    "entry_idx": d_idx,
-                                    "stop_pct": _calc_stop(cfg, vol_map, cand_sym, d_idx),
-                                }
+                                positions[cand_sym] = _make_position(
+                                    shares, p_buy, d_idx,
+                                    _calc_stop(cfg, vol_map, cand_sym, d_idx),
+                                    pyramid=cfg.pyramid,
+                                )
                                 trade_count += 1
                             break  # 每週最多 1 次 ROTATE
 
@@ -387,15 +435,50 @@ class PortfolioSimulator:
                         cost = shares * p_buy
                         cash -= cost
                         total_buy_val += cost
-                        positions[cand_sym] = {
-                            "shares": shares,
-                            "avg_price": p_buy,
-                            "high_price": p_buy,
-                            "profit_taken": False,
-                            "entry_idx": d_idx,
-                            "stop_pct": _calc_stop(cfg, vol_map, cand_sym, d_idx),
-                        }
+                        positions[cand_sym] = _make_position(
+                            shares, p_buy, d_idx,
+                            _calc_stop(cfg, vol_map, cand_sym, d_idx),
+                            pyramid=cfg.pyramid,
+                        )
                         trade_count += 1
+
+                # ── 金字塔加碼：對動能仍強的持倉加第二批 ──────────────
+                if cfg.pyramid and cash >= MIN_POSITION_VAL:
+                    port_val = cash + sum(
+                        pos["shares"] * max(px.get(s, pos["avg_price"]), 0.01)
+                        for s, pos in positions.items()
+                    )
+                    equal_w = port_val / MAX_POSITIONS
+                    budget  = equal_w * 0.5   # 第二批用半個等權重
+
+                    for cand_sym, cand_mom in ranked:
+                        if cand_mom <= 0:
+                            break
+                        if cand_sym not in positions:
+                            continue
+                        pos = positions[cand_sym]
+                        if len(pos.get("tranches", [])) >= 2:
+                            continue          # 已有兩批，不再加
+                        p_buy = px.get(cand_sym, np.nan)
+                        if np.isnan(p_buy) or p_buy <= 0:
+                            continue
+                        if pos["shares"] * p_buy >= equal_w * 1.8:
+                            continue          # 已夠大，不追加
+                        if cash < budget * 0.5:
+                            break
+                        alloc  = min(budget, cash * 0.8)
+                        shares = int(alloc // p_buy)
+                        if shares <= 0:
+                            continue
+                        cost = shares * p_buy
+                        cash -= cost
+                        total_buy_val += cost
+                        new_t = _make_tranche(shares, p_buy, d_idx,
+                                              _calc_stop(cfg, vol_map, cand_sym, d_idx))
+                        pos["tranches"].append(new_t)
+                        _sync_position(pos)
+                        trade_count += 1
+                        break  # 每週最多加碼一次
 
             # ── 記錄當日淨值 ──────────────────────────────────
             port_val = cash + sum(

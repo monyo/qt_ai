@@ -542,8 +542,8 @@ def run_momentum(top_n: int = 20):
     positions = portfolio.get("positions", {})
     held_symbols = list(positions.keys())
 
-    # 候選池
-    sp500 = get_sp500_tickers()[:100]
+    # 候選池（全 S&P 500，與完整盤前一致）
+    sp500 = get_sp500_tickers()
     watchlist = load_watchlist()
     wl_symbols = watchlist.get("symbols", [])
     all_tickers = list(dict.fromkeys(sp500 + wl_symbols + held_symbols))
