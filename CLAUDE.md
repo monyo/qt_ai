@@ -119,12 +119,23 @@ Quantitative stock scanning + position management system. Combines technical ana
   - 安全 TOPUP（停損高於成本）以 `[增持]` 標籤合入 ADD 清單，目標補到等權重（total_value/30）
   - 非安全 TOPUP 獨立顯示於下方「風險較高」區塊
 - **RSI 警告**：🔴 RSI > 80 極度超買、🟡 RSI > 75 超買（只警告不過濾，讓使用者決定）
+  - **設計理由**：動能策略中 RSI 高 = 強者恆強，不應成為排除或推遲買入的理由。
+    RSI 均值回歸適用於短線反轉交易，與本系統中期動能策略方向相反。
 - **趨勢狀態**（回測驗證月差 +2.14%）：
   - ↗️ 轉強：40 日低點反彈 >20% 且距高點 <5%（V 轉格局）
   - ↘️ 轉弱：距 40 日高點 >15%（倒 V 格局）
   - → 盤整：其他
   - 特殊警告：動能正 + 轉弱 = ⚠️ 倒V警告、動能負 + 轉強 = 💡 V轉回升中
-- **候選池**：S&P 500 前 100 + `data/watchlist.json` 白名單
+- **ADD 主清單 Alpha 過濾**（`_alpha_qualifies` in `premarket.py`）：
+  - 規則：1Y alpha > 0 AND 3Y alpha > -30%（相對 SPY 超額報酬）
+  - **為何 3Y 用 -30% 而非 0%**：3Y alpha 區分「結構性衰退」vs「宏觀打趴後反彈」。
+    -30% 以上（如 APP/PLTR/WDC 歷史）屬宏觀打趴，仍允許進主清單；
+    深度負值（LYB -75%、OXY -76%）屬結構衰退，排除。
+  - **Alpha 分組邏輯**：A-雙優（1Y>0, 3Y>-30%）進主清單；B1（1Y>0, 3Y≤-30%）排除；
+    不足 5 名時從排除池按 1Y alpha 降序補位，補位標的標示 ⚠️
+  - **回測發現**（2024 年 S&P500 505 支）：B1 平均報酬被 APP(+317%)/PLTR(+113%) 等拉高，
+    移除後 B1 vs A 的 3M 風險分佈幾乎相同；過濾深度 3Y 負值標的不顯著傷害報酬。
+- **候選池**：S&P 500 全部（505 支）+ `data/watchlist.json` 白名單
 - **Sizing**：等權重 cash / available_slots；TOPUP 增持目標為 total_value / 30（等權重）
 - **報價定義**：前一交易日收盤價（盤前 yfinance 最後一筆 Close）
 - Signal 是事件（1/-1/0），backtester 轉為 Position（0/1）狀態機
