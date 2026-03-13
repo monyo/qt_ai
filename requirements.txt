@@ -1,17 +1,17 @@
 # 基礎數據處理
-pandas
-numpy
-pandas_ta
-yfinance
+pandas>=2.3.3
+numpy>=2.2.6
+pandas_ta>=0.4.71b0
+yfinance>=1.0
 
 # 網頁爬蟲與網路請求
-requests
-beautifulsoup4
-lxml
+requests>=2.32.5
+beautifulsoup4>=4.14.3
+lxml>=6.0.2
 
 # AI 與環境變數
-google-genai
-python-dotenv
+google-genai>=1.60.0
+python-dotenv>=1.2.1
 
 # 繪圖與視覺化
-matplotlib
+matplotlib>=3.10.8

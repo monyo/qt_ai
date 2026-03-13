@@ -60,6 +60,8 @@ class StrategyConfig:
     profit_take: bool = False   # 啟用停利
     trailing: bool = False      # 啟用追蹤停損
     sector_limit: bool = False  # 啟用板塊上限
+    min_hold_days: int = 0      # ROTATE 最短持有天數（0 = 無限制）
+    vol_stop_k: float = 0.0    # 波動率停損倍數（0 = 固定 -15%；>0 = k × 月波動率）
 
 
 STRATEGIES = [
@@ -180,14 +182,51 @@ def calc_bnh_metrics(price_arr: np.ndarray, n_days: int) -> dict:
     }
 
 
+# ── 波動率計算 ─────────────────────────────────────────────────────────────────
+
+def calc_vol_map(aligned: dict, window: int = 14) -> dict:
+    """計算各股票每日 N 日滾動波動率（日報酬標準差），回傳 {sym: np.ndarray}
+
+    停損公式：stop_pct = -k × daily_vol × sqrt(21)
+    約等於「k 個月波動率」為停損幅度，自動對高波動股放寬、低波動股收緊。
+    """
+    vol_map = {}
+    for sym, arr in aligned.items():
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rets = np.where(
+                arr[:-1] > 0,
+                np.log(np.where(arr[1:] > 0, arr[1:], arr[:-1]) / arr[:-1]),
+                0.0,
+            )
+        vol = pd.Series(np.abs(rets)).rolling(window, min_periods=5).mean().fillna(0.02).values
+        # 對齊：第 0 天用第 1 天的值
+        vol_map[sym] = np.concatenate([[vol[0]], vol])
+    return vol_map
+
+
 # ── 投組模擬器 ─────────────────────────────────────────────────────────────────
+
+VOL_STOP_FLOOR = 0.05   # 最緊停損（-5%，不讓低波動股被噪音洗掉）
+VOL_STOP_CAP   = 0.30   # 最寬停損（-30%）
+
+
+def _calc_stop(cfg: "StrategyConfig", vol_map: dict, sym: str, d_idx: int) -> float:
+    """計算進場時的停損幅度（負數）"""
+    if cfg.vol_stop_k <= 0 or vol_map is None:
+        return FIXED_STOP  # 固定 -15%
+    daily_vol = vol_map.get(sym, np.zeros(max(d_idx + 1, 1)))[d_idx]
+    monthly_vol = daily_vol * np.sqrt(21)   # 換算成月波動率
+    raw = -cfg.vol_stop_k * monthly_vol
+    return max(-VOL_STOP_CAP, min(-VOL_STOP_FLOOR, raw))
+
 
 class PortfolioSimulator:
     def __init__(self, config: StrategyConfig):
         self.cfg = config
 
     def run(self, aligned: dict, sector_map: dict,
-            spy_bull: np.ndarray, common_dates: pd.DatetimeIndex) -> dict:
+            spy_bull: np.ndarray, common_dates: pd.DatetimeIndex,
+            vol_map: dict = None) -> dict:
 
         cfg   = self.cfg
         cash  = INITIAL_CASH
@@ -225,9 +264,9 @@ class PortfolioSimulator:
                     to_exit.append(sym)
                     continue
 
-                # 2. Fixed stop（breakeven stop 若已停利，否則 -15%）
+                # 2. Fixed / Vol stop（breakeven stop 若已停利，否則看策略）
                 pnl = (p - pos["avg_price"]) / pos["avg_price"]
-                threshold = 0.0 if pos.get("profit_taken") else FIXED_STOP
+                threshold = 0.0 if pos.get("profit_taken") else pos.get("stop_pct", FIXED_STOP)
                 if pnl <= threshold:
                     to_exit.append(sym)
                     continue
@@ -268,49 +307,55 @@ class PortfolioSimulator:
                         mom[s] = m
                 ranked = sorted(mom.items(), key=lambda x: -x[1])
 
-                # ROTATE：每週最多 1 次，汰弱換強
+                # ROTATE：每週最多 1 次，汰弱換強（排除保護期內持倉）
                 if positions:
-                    pos_moms = {s: mom.get(s, -999.0) for s in positions}
-                    worst_sym = min(pos_moms, key=pos_moms.get)
-                    worst_mom = pos_moms[worst_sym]
+                    rotatable = {
+                        s: mom.get(s, -999.0) for s in positions
+                        if d_idx - positions[s].get("entry_idx", 0) >= cfg.min_hold_days
+                    }
+                    if rotatable:
+                        worst_sym = min(rotatable, key=rotatable.get)
+                        worst_mom = rotatable[worst_sym]
 
-                    for cand_sym, cand_mom in ranked:
-                        if cand_sym in positions:
-                            continue
-                        if cand_mom - worst_mom < ROTATE_GAP:
-                            break
+                        for cand_sym, cand_mom in ranked:
+                            if cand_sym in positions:
+                                continue
+                            if cand_mom - worst_mom < ROTATE_GAP:
+                                break
 
-                        # 板塊限制
-                        if cfg.sector_limit:
-                            sec = sector_map.get(cand_sym, "Unknown")
-                            cnt = sum(1 for s in positions
-                                      if sector_map.get(s, "Unknown") == sec)
-                            if cnt >= MAX_PER_SECTOR:
+                            # 板塊限制
+                            if cfg.sector_limit:
+                                sec = sector_map.get(cand_sym, "Unknown")
+                                cnt = sum(1 for s in positions
+                                          if sector_map.get(s, "Unknown") == sec)
+                                if cnt >= MAX_PER_SECTOR:
+                                    continue
+
+                            p_sell = px.get(worst_sym, np.nan)
+                            p_buy  = px.get(cand_sym, np.nan)
+                            if np.isnan(p_sell) or np.isnan(p_buy) or p_buy <= 0:
                                 continue
 
-                        p_sell = px.get(worst_sym, np.nan)
-                        p_buy  = px.get(cand_sym, np.nan)
-                        if np.isnan(p_sell) or np.isnan(p_buy) or p_buy <= 0:
-                            continue
-
-                        proceeds = positions[worst_sym]["shares"] * p_sell
-                        cash += proceeds
-                        del positions[worst_sym]
-                        trade_count += 1
-
-                        shares = int(proceeds // p_buy)
-                        if shares > 0:
-                            cost = shares * p_buy
-                            cash -= cost
-                            total_buy_val += cost
-                            positions[cand_sym] = {
-                                "shares": shares,
-                                "avg_price": p_buy,
-                                "high_price": p_buy,
-                                "profit_taken": False,
-                            }
+                            proceeds = positions[worst_sym]["shares"] * p_sell
+                            cash += proceeds
+                            del positions[worst_sym]
                             trade_count += 1
-                        break  # 每週最多 1 次 ROTATE
+
+                            shares = int(proceeds // p_buy)
+                            if shares > 0:
+                                cost = shares * p_buy
+                                cash -= cost
+                                total_buy_val += cost
+                                positions[cand_sym] = {
+                                    "shares": shares,
+                                    "avg_price": p_buy,
+                                    "high_price": p_buy,
+                                    "profit_taken": False,
+                                    "entry_idx": d_idx,
+                                    "stop_pct": _calc_stop(cfg, vol_map, cand_sym, d_idx),
+                                }
+                                trade_count += 1
+                            break  # 每週最多 1 次 ROTATE
 
                 # ADD：填補空缺槽位
                 avail = MAX_POSITIONS - len(positions)
@@ -347,6 +392,8 @@ class PortfolioSimulator:
                             "avg_price": p_buy,
                             "high_price": p_buy,
                             "profit_taken": False,
+                            "entry_idx": d_idx,
+                            "stop_pct": _calc_stop(cfg, vol_map, cand_sym, d_idx),
                         }
                         trade_count += 1
 

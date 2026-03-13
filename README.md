@@ -18,14 +18,32 @@
 
 ## 安裝
 
+### 1. 建立 conda 環境（推薦）
+
 ```bash
-# 使用 conda（推薦）
+# 建立環境（Python 3.12，環境名稱 qt_env）
+conda create -n qt_env python=3.12 -y
+
+# 啟動環境
 conda activate qt_env
 
-# 或使用 pip
+# 安裝所有依賴
 pip install -r requirements.txt
+```
 
-# 設定 API Key 與 Email
+> **注意**：每次開啟新的 terminal 都需要先 `conda activate qt_env`，
+> 或者直接用 `conda run -n qt_env python premarket_main.py`。
+
+### 2. 或使用 pip + pyenv / 系統 Python
+
+```bash
+# 需要 Python 3.12
+pip install -r requirements.txt
+```
+
+### 3. 設定 API Key 與 Email
+
+```bash
 touch .env
 echo "GEMINI_API_KEY=your_key_here" >> .env
 echo "EMAIL_ENABLED=true" >> .env
@@ -33,6 +51,7 @@ echo "GMAIL_SENDER=your_gmail@gmail.com" >> .env
 echo "GMAIL_APP_PASSWORD=your_gmail_app_password" >> .env
 echo "GMAIL_RECIPIENT=your_recipient_email@gmail.com" >> .env
 ```
+
 > **注意**: `GMAIL_APP_PASSWORD` 需要在你的 Google 帳戶中產生「應用程式密碼」，而不是你的登入密碼。
 
 ---

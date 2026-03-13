@@ -186,23 +186,46 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             and m["symbol"] not in exit_symbols
         ]
 
-        # 策略 B: 集中火力
-        # 計算實際要買入的檔數 (最多5檔)
-        ADD_BACKUP = 3  # 額外備選數，供用戶替換 1Y/3Y alpha 差的標的
-        num_to_add = min(5, available_slots, len(buy_candidates))
+        # 主清單過濾：1Y > 0 AND 3Y > -30%（輕微落後視為宏觀打趴，允許進主清單）
+        def _alpha_qualifies(sym):
+            a1y = alpha_1y_map.get(sym)
+            a3y = alpha_3y_map.get(sym)
+            if a1y is not None and a1y <= 0:
+                return False
+            if a3y is not None and a3y < -30:
+                return False
+            return True
 
-        # 根據實際要買的檔數來決定單一部位大小
+        alpha_good = [m for m in buy_candidates if _alpha_qualifies(m["symbol"])]
+        alpha_poor = [m for m in buy_candidates if not _alpha_qualifies(m["symbol"])]
+
+        ADD_BACKUP = 3
+        TARGET_PRIMARY = 5
+
+        # 正常：取 alpha_good 前 5；不足時從 alpha_poor 按 1Y alpha 降序補足
+        if len(alpha_good) >= TARGET_PRIMARY:
+            primary_pool = alpha_good
+            leftover_poor = alpha_poor
+        else:
+            supplement = sorted(
+                alpha_poor,
+                key=lambda m: (alpha_1y_map.get(m["symbol"]) or -999),
+                reverse=True,
+            )
+            needed = TARGET_PRIMARY - len(alpha_good)
+            primary_pool = alpha_good + supplement[:needed]
+            leftover_poor = supplement[needed:]
+
+        num_to_add = min(TARGET_PRIMARY, available_slots, len(primary_pool))
         if num_to_add > 0:
             position_size = projected_cash / num_to_add
         else:
             position_size = 0
 
-        # 已經按動能排序，提出建議（主要候選 + 備選）
-        # 備選過濾：3Y alpha 必須 >= 0，才是有效替代品
-        primary_candidates = buy_candidates[:num_to_add]
-        backup_pool = buy_candidates[num_to_add:]
+        primary_candidates = primary_pool[:num_to_add]
+        backup_src = primary_pool[num_to_add:] + leftover_poor
         valid_backups = [
-            m for m in backup_pool
+            m for m in backup_src
             if alpha_3y_map.get(m["symbol"]) is None or alpha_3y_map.get(m["symbol"]) >= 0
         ][:ADD_BACKUP]
         candidates_to_show = [(m, False) for m in primary_candidates] + [(m, True) for m in valid_backups]
@@ -226,6 +249,9 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             reason = f"動能排名 #{rank}（+{momentum:.1f}%）"
             if is_backup:
                 reason = f"[備選] {reason}"
+            is_supplemented = not _alpha_qualifies(symbol)
+            if not is_backup and is_supplemented:
+                reason += " ⚠️ 補位（alpha 不符主清單標準）"
             if suggested_shares == 0 and not is_backup:
                 reason += "（現金不足）"
             if rsi is not None and rsi > RSI_EXTREME:

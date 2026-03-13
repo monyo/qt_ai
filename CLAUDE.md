@@ -2,10 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Environment Setup
+
+**Python 3.12 + conda 環境 `qt_env`**（首次或新機器時）
+
+```bash
+conda create -n qt_env python=3.12 -y
+conda activate qt_env
+pip install -r requirements.txt
+```
+
+每次執行前確認在 `qt_env` 中（`conda activate qt_env`）。
+
 ## Running the Application
 
 ```bash
-# Install dependencies
+# Install dependencies（已建立環境後）
 pip install -r requirements.txt
 
 # Set up API keys in .env file
