@@ -237,7 +237,8 @@ def run_premarket(scan_tw=False):
             safe_topups.append({**s, "topup_shares": topup_shares, "topup_cost": topup_cost})
 
     # 5.7 重算 ROTATE 後的 ADD 股數（扣除安全 TOPUP 預算）
-    adds_list = [a for a in actions if a["action"] == "ADD"]
+    # 只算主清單（非備選），備選 suggested_shares=0 不參與現金分配
+    adds_list = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup", False)]
     rotates_list = [a for a in actions if a["action"] == "ROTATE"]
     rotate_proceeds = sum(a["sell_shares"] * a["sell_price"] * CASH_SAFETY_FACTOR for a in rotates_list)
     post_rotate_cash = portfolio.get("cash", 0) + rotate_proceeds
