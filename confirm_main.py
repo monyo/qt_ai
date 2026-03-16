@@ -37,11 +37,16 @@ def run_confirm(date_str):
         if action_type == "EXIT":
             symbol = a["symbol"]
             pnl = f"{a['pnl_pct']:+.2f}%" if a.get("pnl_pct") is not None else "N/A"
-            print(f"[{a['id']}] EXIT {symbol} | {a['shares']} 股 | P&L: {pnl}")
+            tranche_str = f" | 第{a['tranche_n']}批" if a.get("tranche_n") else ""
+            print(f"[{a['id']}] EXIT {symbol}{tranche_str} | {a['shares']} 股 | P&L: {pnl}")
             print(f"    原因: {a['reason']}")
         elif action_type == "ADD":
             symbol = a["symbol"]
-            print(f"[{a['id']}] ADD  {symbol} | 建議 {a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}")
+            if a.get("is_pyramid"):
+                direction_arrow = "↑" if a.get("direction") == "up" else "↓"
+                print(f"[{a['id']}] ADD  {symbol} | 金字塔{direction_arrow}第{a['tranche_n']}批 | 建議 {a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}")
+            else:
+                print(f"[{a['id']}] ADD  {symbol} | 建議 {a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}")
             print(f"    原因: {a['reason']}")
         elif action_type == "ROTATE":
             sell_sym = a["sell_symbol"]

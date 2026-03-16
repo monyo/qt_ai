@@ -8,6 +8,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from dotenv import load_dotenv
 
+from src.risk import TRANCHE_PARAMS
+
 load_dotenv()
 
 
@@ -43,7 +45,8 @@ class GmailNotifier:
         regime_tag = " 🔴BEAR" if not regime.get("is_bull", True) else ""
         subject = f"盤前報告 {actions_data['date']} | 投組 ${total_value:,.0f}{regime_tag}"
         text_body = self._format_text_report(actions_data)
-        html_body = self._format_html_report(actions_data)
+        summary_html = self._format_summary_html(actions_data)
+        full_html = self._format_html_report(actions_data)
 
         data_dir = pathlib.Path("data")
         year = datetime.date.today().year
@@ -54,7 +57,152 @@ class GmailNotifier:
         ]
         attachments = [(p.name, p.read_bytes()) for p in candidates if p.exists()]
 
-        return self._send_email(subject, text_body, html_body, attachments=attachments)
+        # PDF 附件（完整報告）
+        pdf_bytes = self._generate_pdf(full_html)
+        if pdf_bytes:
+            report_date = actions_data.get("date", str(datetime.date.today())).replace("-", "")
+            attachments.insert(0, (f"premarket_{report_date}.pdf", pdf_bytes))
+
+        return self._send_email(subject, text_body, summary_html, attachments=attachments)
+
+    def _generate_pdf(self, html_content):
+        """將 HTML 報告轉為 PDF bytes（A4 橫向）"""
+        try:
+            from weasyprint import HTML, CSS
+            page_css = CSS(string='''
+                @page { size: A4 landscape; margin: 1.2cm 1cm; }
+                body {
+                    font-family: Arial, sans-serif;
+                    font-size: 11px;
+                    max-width: none !important;
+                    margin: 0 !important;
+                    color: #333;
+                }
+                h2 { font-size: 15px; margin: 0 0 6px; }
+                h3 {
+                    font-size: 12px;
+                    margin: 14px 0 4px;
+                    page-break-after: avoid;
+                    break-after: avoid;
+                }
+                table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    page-break-inside: auto;
+                    margin-bottom: 4px;
+                }
+                thead { display: table-header-group; }
+                tr { page-break-inside: avoid; break-inside: avoid; }
+                th { padding: 5px 7px; font-size: 11px; }
+                td { padding: 5px 7px; font-size: 11px; }
+                .section-block {
+                    page-break-inside: avoid;
+                    break-inside: avoid;
+                }
+                p { margin: 4px 0; font-size: 11px; }
+            ''')
+            return HTML(string=html_content).write_pdf(stylesheets=[page_css])
+        except Exception as e:
+            print(f"PDF 生成失敗: {e}")
+            return None
+
+    def _format_summary_html(self, data):
+        """產生簡短摘要 HTML（email 本文）"""
+        portfolio = data.get("portfolio_snapshot", {})
+        actions = data.get("actions", [])
+        regime = data.get("regime_status", {})
+        sector = data.get("sector_status", {})
+
+        # 年度 P&L
+        yearly = portfolio.get("yearly_pnl")
+        yearly_str = ""
+        if yearly:
+            sign = "+" if yearly["pnl_amount"] >= 0 else ""
+            color = "#28a745" if yearly["pnl_amount"] >= 0 else "#dc3545"
+            yearly_str = f' &nbsp;<span style="color:{color};">{sign}${yearly["pnl_amount"]:,.0f} ({sign}{yearly["pnl_pct"]:.1f}% YTD)</span>'
+
+        # 市場體制
+        if regime.get("is_bull", True):
+            pct = f"+{regime.get('pct_vs_ma200', 0):.1f}%"
+            regime_str = f'<span style="color:#28a745;">🟢 BULL SPY {pct} vs MA200</span>'
+        else:
+            pct = f"{regime.get('pct_vs_ma200', 0):.1f}%"
+            regime_str = f'<span style="color:#dc3545;">🔴 BEAR SPY {pct} vs MA200</span>'
+
+        # 板塊概況（一行）
+        sector_html = ""
+        sectors_data = (sector.get("relative") or {}).get("sectors") or {}
+        if sectors_data:
+            parts = []
+            for name, s in sectors_data.items():
+                pct_val = s.get("vs_spy_5d")
+                if pct_val is not None:
+                    c = "#28a745" if pct_val >= 0 else "#dc3545"
+                    parts.append(f'<span style="color:{c};">{name} {pct_val:+.1f}%</span>')
+            if parts:
+                sector_html = f'<p style="margin:6px 0;font-size:12px;">板塊 vs SPY (5d): {" &nbsp;|&nbsp; ".join(parts)}</p>'
+
+        # Actions 分類
+        exits = [a for a in actions if a["action"] == "EXIT"]
+        new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
+        pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid")]
+        rotates = [a for a in actions if a["action"] == "ROTATE"]
+        holds = [a for a in actions if a["action"] == "HOLD"]
+
+        # EXIT 表
+        exit_html = ""
+        if exits:
+            rows = ""
+            for a in exits:
+                pnl = a.get("pnl_pct", 0)
+                pnl_color = "#28a745" if pnl and pnl >= 0 else "#dc3545"
+                tranche_str = f" 第{a['tranche_n']}批" if a.get("tranche_n") else ""
+                rows += f'<tr style="background:#fdf2f2;"><td style="padding:5px 8px;font-weight:bold;">{a["symbol"]}{tranche_str}</td><td style="padding:5px 8px;">{a.get("shares", 0)} 股</td><td style="padding:5px 8px;color:{pnl_color};">{pnl:+.1f}%</td><td style="padding:5px 8px;font-size:11px;color:#666;">{a.get("reason", "")[:60]}</td></tr>'
+            exit_html = f'<h3 style="color:#dc3545;margin:14px 0 5px;">⛔ EXIT ({len(exits)} 筆)</h3><table style="border-collapse:collapse;width:100%;font-size:12px;"><tr style="background:#f0f0f0;"><th style="padding:5px 8px;text-align:left;">標的</th><th>股數</th><th>P&amp;L</th><th style="text-align:left;">原因</th></tr>{rows}</table>'
+
+        # ROTATE 表
+        rotate_html = ""
+        if rotates:
+            rows = ""
+            for a in rotates:
+                rows += f'<tr><td style="padding:5px 8px;color:#dc3545;font-weight:bold;">{a["sell_symbol"]}</td><td style="padding:5px 8px;">→</td><td style="padding:5px 8px;color:#28a745;font-weight:bold;">{a["buy_symbol"]}</td><td style="padding:5px 8px;font-size:11px;color:#666;">{a.get("reason", "")[:70]}</td></tr>'
+            rotate_html = f'<h3 style="color:#fd7e14;margin:14px 0 5px;">🔄 ROTATE ({len(rotates)} 組)</h3><table style="border-collapse:collapse;width:100%;font-size:12px;border-top:1px solid #eee;">{rows}</table>'
+
+        # ADD 表
+        add_html = ""
+        if new_adds or pyramid_adds:
+            rows = ""
+            for a in new_adds:
+                rows += f'<tr><td style="padding:5px 8px;font-weight:bold;">{a["symbol"]}</td><td style="padding:5px 8px;font-size:11px;color:#555;">新倉 {a.get("suggested_shares", 0)} 股 @ ${a.get("current_price", 0):.2f}</td><td style="padding:5px 8px;font-size:11px;color:#666;">{a.get("reason", "")[:60]}</td></tr>'
+            for a in pyramid_adds:
+                direction = "↑" if a.get("direction") == "up" else "↓"
+                rows += f'<tr style="background:#f0f7ff;"><td style="padding:5px 8px;font-weight:bold;">{a["symbol"]}</td><td style="padding:5px 8px;font-size:11px;color:#0066cc;">金字塔{direction} 第{a.get("tranche_n", 2)}批 {a.get("suggested_shares", 0)} 股</td><td style="padding:5px 8px;font-size:11px;color:#666;">{a.get("reason", "")[:60]}</td></tr>'
+            add_html = f'<h3 style="color:#28a745;margin:14px 0 5px;">➕ ADD ({len(new_adds)} 新倉 + {len(pyramid_adds)} 金字塔)</h3><table style="border-collapse:collapse;width:100%;font-size:12px;border-top:1px solid #eee;">{rows}</table>'
+
+        hold_html = f'<p style="margin:10px 0;font-size:12px;color:#6c757d;">✅ HOLD: {len(holds)} 檔（詳見附件 PDF）</p>'
+
+        return f'''<html>
+<body style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;padding:20px;color:#333;">
+  <h2 style="margin-bottom:4px;">盤前報告 {data["date"]}</h2>
+  <p style="color:#6c757d;margin:0 0 12px;font-size:12px;">版本 {data.get("version", "N/A")} &nbsp;|&nbsp; {regime_str}</p>
+
+  <div style="background:#f8f9fa;padding:12px 16px;border-radius:6px;margin-bottom:12px;font-size:13px;">
+    <strong>投組總值: ${portfolio.get("total_value", 0):,.0f}</strong>
+    &nbsp;&nbsp; 現金: ${portfolio.get("cash", 0):,.0f}
+    &nbsp;&nbsp; 個股: {portfolio.get("individual_count", 0)}/30{yearly_str}
+  </div>
+
+  {sector_html}
+  {exit_html}
+  {rotate_html}
+  {add_html}
+  {hold_html}
+
+  <p style="color:#aaa;font-size:11px;margin-top:20px;">📎 完整持倉表、建議詳情請見附件 PDF</p>
+  <hr style="border:none;border-top:1px solid #eee;margin:12px 0;">
+  <p style="color:#ccc;font-size:10px;">此郵件由盤前建議系統自動發送</p>
+</body>
+</html>'''
 
     def _format_text_report(self, data):
         """產生純文字報告"""
@@ -102,14 +250,17 @@ class GmailNotifier:
         # 分類 actions
         exits = [a for a in actions if a["action"] == "EXIT"]
         holds = [a for a in actions if a["action"] == "HOLD"]
-        adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
+        new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
+        pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid")]
         backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
+        adds = new_adds  # 向下相容
 
         if exits:
-            lines.append(f"EXIT 建議 ({len(exits)} 檔):")
+            lines.append(f"EXIT 建議 ({len(exits)} 筆):")
             for a in exits:
                 pnl = f"{a.get('pnl_pct', 0):+.1f}%" if a.get("pnl_pct") is not None else "N/A"
-                lines.append(f"  {a['symbol']:<6} {a.get('shares', 0):>4} 股  {pnl:<8} {a.get('reason', '')}")
+                tranche_str = f" 第{a['tranche_n']}批" if a.get("tranche_n") else ""
+                lines.append(f"  {a['symbol']:<6}{tranche_str} {a.get('shares', 0):>4} 股  {pnl:<8} {a.get('reason', '')}")
             lines.append("")
 
         if holds:
@@ -126,10 +277,9 @@ class GmailNotifier:
             lines.append(f"HOLD ({len(holds)} 檔): {', '.join(hold_parts)}")
             lines.append("")
 
-        safe_topups = data.get("safe_topups", [])
-        if adds or safe_topups or backup_adds:
-            lines.append(f"ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持 + {len(backup_adds)} 備選):")
-            for a in adds:
+        if new_adds or pyramid_adds or backup_adds:
+            lines.append(f"ADD 建議 ({len(new_adds)} 新倉 + {len(pyramid_adds)} 金字塔 + {len(backup_adds)} 備選):")
+            for a in new_adds:
                 momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
                 rank = a.get("momentum_rank", "?")
                 shares = a.get("suggested_shares", 0)
@@ -157,10 +307,11 @@ class GmailNotifier:
                     shares_str += f" (ROTATE後 {post_rotate} 股)"
                 sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
                 lines.append(f"  #{rank} {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum}{rsi_str}{alpha_str}")
-            for s in safe_topups:
-                momentum = f"+{s.get('momentum', 0):.1f}%(#{s.get('momentum_rank', '?')})"
-                alpha_str = f"  1Y: {s['alpha_1y']:+.0f}%" if s.get("alpha_1y") is not None else ""
-                lines.append(f"  [增持] {s['symbol']:<6} +{s['topup_shares']} 股 @ ${s['current_price']:.2f}  {momentum}  {s['current_weight_pct']:.1f}%→等權重  🟢 安全{alpha_str}")
+            for a in pyramid_adds:
+                momentum = f"+{a.get('momentum', 0):.1f}%"
+                direction_arrow = "↑" if a.get("direction") == "up" else "↓"
+                alpha_str = f"  1Y: {a['alpha_1y']:+.0f}%" if a.get("alpha_1y") is not None else ""
+                lines.append(f"  [{direction_arrow}第{a['tranche_n']}批] {a['symbol']}  +{a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}  {momentum}{alpha_str}")
             if backup_adds:
                 lines.append("  [備選 — 可替換 1Y/3Y alpha 差的主要候選]")
                 for a in backup_adds:
@@ -199,15 +350,6 @@ class GmailNotifier:
                 lines.append(f"  → 買 {a['buy_symbol']}{buy_sector_tag}  {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
                 lines.append(f"     {a.get('reason', '')}")
                 lines.append("")
-
-        # TOPUP 增持參考
-        topups = data.get("topup_suggestions", [])
-        if topups:
-            lines.append(f"TOPUP 增持參考（倉位<2%、動能強、趨勢轉強）({len(topups)} 檔):")
-            for s in topups:
-                lines.append(f"  {s['symbol']:<6} 倉位{s['current_weight_pct']:.1f}%  動能+{s['momentum']:.1f}%(#{s['momentum_rank']})  追高{s['run_up_pct']:+.1f}%  {s['safety']}")
-                lines.append(f"         現價${s['current_price']:.2f}  成本${s['avg_price']:.2f}  新停損${s['new_stop']:.2f}  {s['safety_note']}")
-            lines.append("")
 
         # 需注意
         watch_lines = []
@@ -290,10 +432,11 @@ class GmailNotifier:
         # Actions 表格
         exits = [a for a in actions if a["action"] == "EXIT"]
         holds = [a for a in actions if a["action"] == "HOLD"]
-        adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
+        new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
+        pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid")]
         backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
+        adds = new_adds
         rotates_sell = {a["sell_symbol"] for a in actions if a["action"] == "ROTATE"}
-        safe_topup_syms = {s["symbol"] for s in data.get("safe_topups", [])}
 
         # === 持倉總覽表 ===
         # 排序：EXIT 優先，再依動能升序（弱的在前），core 放最後
@@ -305,9 +448,29 @@ class GmailNotifier:
             return (1, a.get("momentum") or 0)
 
         portfolio_rows_data = sorted(exits + holds, key=portfolio_sort_key)
+
+        _stop_type_labels = {"standard": "標準", "tight_2": "緊②", "tight_3": "緊③"}
+
+        def _protect_html(t):
+            """計算批次保護期 HTML"""
+            t_stop_type = t.get("stop_type", "standard")
+            params = TRANCHE_PARAMS.get(t_stop_type, TRANCHE_PARAMS["standard"])
+            try:
+                entry_date = datetime.date.fromisoformat(t.get("entry_date", ""))
+                days_since = (datetime.date.today() - entry_date).days
+                days_left = params["protect"] - days_since
+                if days_left > 0:
+                    return f'<span style="color:#fd7e14;">保護{days_left}d</span>'
+                return '<span style="color:#28a745;">可出場</span>'
+            except Exception:
+                return "—"
+
         portfolio_rows = ""
         for a in portfolio_rows_data:
             sym = a["symbol"]
+            tranches = a.get("tranches") or []
+            n_rows = len(tranches) if tranches else 1
+
             pnl = a.get("pnl_pct")
             momentum = a.get("momentum")
             rank = a.get("momentum_rank")
@@ -319,11 +482,10 @@ class GmailNotifier:
 
             # 決定 Action 標籤
             if a["action"] == "EXIT":
-                action_label = '<span style="color:#dc3545;font-weight:bold;">⛔ EXIT</span>'
+                tranche_str = f" 第{a.get('tranche_n')}批" if a.get("tranche_n") else ""
+                action_label = f'<span style="color:#dc3545;font-weight:bold;">⛔ EXIT{tranche_str}</span>'
             elif sym in rotates_sell:
                 action_label = '<span style="color:#fd7e14;font-weight:bold;">🔄 ROTATE</span>'
-            elif sym in safe_topup_syms:
-                action_label = '<span style="color:#6f42c1;font-weight:bold;">📈 TOPUP</span>'
             elif a.get("source") == "core_hold":
                 action_label = '<span style="color:#6c757d;">🔒 CORE</span>'
             else:
@@ -345,18 +507,10 @@ class GmailNotifier:
             else:
                 momentum_str = "—"
 
-            # P&L 欄
-            if pnl is not None:
-                pnl_color = "#28a745" if pnl >= 0 else "#dc3545"
-                pnl_str = f'<span style="color:{pnl_color};">{pnl:+.1f}%</span>'
-            else:
-                pnl_str = "—"
-
-            # 進場後高點 & 回落% 欄
+            # 距高%
             high_price = a.get("high_since_entry")
             if high_price and price and high_price > 0:
                 from_high = (price - high_price) / high_price * 100
-                high_str = f'${high_price:.2f}'
                 if from_high <= -20:
                     fh_color, fh_icon = "#dc3545", "🔴"
                 elif from_high <= -10:
@@ -365,39 +519,92 @@ class GmailNotifier:
                     fh_color, fh_icon = "#6c757d", ""
                 from_high_str = f'<span style="color:{fh_color};">{fh_icon}{from_high:.0f}%</span>'
             else:
-                high_str = "—"
                 from_high_str = "—"
 
             # 列底色邏輯
             if a["action"] == "EXIT":
-                row_bg = "background:#f8d7da;"          # 紅：觸發出場
+                row_bg = "background:#f8d7da;"
             elif sym in rotates_sell:
-                row_bg = "background:#ffe8cc;"          # 橘：建議 ROTATE 賣出
+                row_bg = "background:#ffe8cc;"
             elif momentum is not None and momentum < 0:
-                row_bg = "background:#fff3cd;"          # 黃：動能轉負
+                row_bg = "background:#fff3cd;"
             elif pnl is not None and pnl < -3 and price < stop_price * 1.05:
-                row_bg = "background:#fff3cd;"          # 黃：接近停損
-            elif sym in safe_topup_syms:
-                row_bg = "background:#f0e6ff;"          # 淺紫：安全加碼機會
+                row_bg = "background:#fff3cd;"
             elif momentum is not None and momentum > 15 and trend_state == "轉強":
-                row_bg = "background:#d4edda;"          # 綠：動能強 + 趨勢佳
+                row_bg = "background:#d4edda;"
             else:
                 row_bg = ""
 
             sector_str = a.get("sector") or "—"
-            portfolio_rows += f'''<tr style="{row_bg}border-bottom:1px solid #eee;">
-                <td style="padding:6px 8px;font-weight:bold;">{sym}</td>
-                <td style="padding:6px 8px;font-size:11px;color:#6c757d;">{sector_str}</td>
-                <td style="padding:6px 8px;text-align:center;">{a.get("shares", 0)}</td>
-                <td style="padding:6px 8px;text-align:right;">${price:.2f}</td>
-                <td style="padding:6px 8px;text-align:right;">${avg_price:.2f}</td>
-                <td style="padding:6px 8px;text-align:right;">{pnl_str}</td>
-                <td style="padding:6px 8px;text-align:right;font-size:12px;color:#495057;">{high_str}</td>
-                <td style="padding:6px 8px;text-align:center;">{from_high_str}</td>
-                <td style="padding:6px 8px;text-align:center;">{momentum_str}</td>
-                <td style="padding:6px 8px;text-align:center;">{trend_label}</td>
-                <td style="padding:6px 8px;text-align:center;">{action_label}</td>
-            </tr>'''
+
+            if not tranches:
+                # EXIT 或無 tranches：沿用單行格式，保護期欄顯示 —
+                if pnl is not None:
+                    pnl_color = "#28a745" if pnl >= 0 else "#dc3545"
+                    pnl_str = f'<span style="color:{pnl_color};">{pnl:+.1f}%</span>'
+                else:
+                    pnl_str = "—"
+                portfolio_rows += f'''<tr style="{row_bg}border-bottom:1px solid #eee;">
+                    <td style="padding:6px 8px;font-weight:bold;">{sym}</td>
+                    <td style="padding:6px 8px;font-size:11px;color:#6c757d;">{sector_str}</td>
+                    <td style="padding:6px 8px;text-align:center;font-size:11px;">—</td>
+                    <td style="padding:6px 8px;text-align:center;">{a.get("shares", 0)}</td>
+                    <td style="padding:6px 8px;text-align:right;">${price:.2f}</td>
+                    <td style="padding:6px 8px;text-align:right;">${avg_price:.2f}</td>
+                    <td style="padding:6px 8px;text-align:right;">{pnl_str}</td>
+                    <td style="padding:6px 8px;text-align:center;">—</td>
+                    <td style="padding:6px 8px;text-align:center;">{from_high_str}</td>
+                    <td style="padding:6px 8px;text-align:center;">{momentum_str}</td>
+                    <td style="padding:6px 8px;text-align:center;">{trend_label}</td>
+                    <td style="padding:6px 8px;text-align:center;">{action_label}</td>
+                </tr>'''
+            else:
+                # 有 tranches：每批次一行，標的/板塊/現價/距高/動能/趨勢/建議 用 rowspan
+                for i, t in enumerate(tranches):
+                    t_entry = t.get("entry_price", avg_price)
+                    t_shares = t.get("shares", 0)
+                    t_stop_type = t.get("stop_type", "standard")
+                    t_n = t.get("n", i + 1)
+
+                    # 批次 P&L（vs 該批進場成本）
+                    if price and t_entry:
+                        t_pnl = (price - t_entry) / t_entry * 100
+                        t_pnl_color = "#28a745" if t_pnl >= 0 else "#dc3545"
+                        t_pnl_str = f'<span style="color:{t_pnl_color};">{t_pnl:+.1f}%</span>'
+                    else:
+                        t_pnl_str = "—"
+
+                    protect_html = _protect_html(t)
+
+                    stop_label = _stop_type_labels.get(t_stop_type, t_stop_type)
+                    batch_html = f'#{t_n} <span style="font-size:10px;color:#6c757d;">{stop_label}</span>'
+
+                    is_last = (i == n_rows - 1)
+                    row_border = "border-bottom:2px solid #dee2e6;" if is_last else "border-bottom:1px solid #f0f0f0;"
+
+                    if i == 0:
+                        portfolio_rows += f'''<tr style="{row_bg}{row_border}">
+                            <td style="padding:6px 8px;font-weight:bold;" rowspan="{n_rows}">{sym}</td>
+                            <td style="padding:6px 8px;font-size:11px;color:#6c757d;" rowspan="{n_rows}">{sector_str}</td>
+                            <td style="padding:6px 8px;text-align:center;font-size:11px;">{batch_html}</td>
+                            <td style="padding:6px 8px;text-align:center;">{t_shares}</td>
+                            <td style="padding:6px 8px;text-align:right;" rowspan="{n_rows}">${price:.2f}</td>
+                            <td style="padding:6px 8px;text-align:right;">${t_entry:.2f}</td>
+                            <td style="padding:6px 8px;text-align:right;">{t_pnl_str}</td>
+                            <td style="padding:6px 8px;text-align:center;">{protect_html}</td>
+                            <td style="padding:6px 8px;text-align:center;" rowspan="{n_rows}">{from_high_str}</td>
+                            <td style="padding:6px 8px;text-align:center;" rowspan="{n_rows}">{momentum_str}</td>
+                            <td style="padding:6px 8px;text-align:center;" rowspan="{n_rows}">{trend_label}</td>
+                            <td style="padding:6px 8px;text-align:center;" rowspan="{n_rows}">{action_label}</td>
+                        </tr>'''
+                    else:
+                        portfolio_rows += f'''<tr style="{row_bg}{row_border}">
+                            <td style="padding:6px 8px;text-align:center;font-size:11px;">{batch_html}</td>
+                            <td style="padding:6px 8px;text-align:center;">{t_shares}</td>
+                            <td style="padding:6px 8px;text-align:right;">${t_entry:.2f}</td>
+                            <td style="padding:6px 8px;text-align:right;">{t_pnl_str}</td>
+                            <td style="padding:6px 8px;text-align:center;">{protect_html}</td>
+                        </tr>'''
 
         portfolio_html = f'''
         <h3 style="margin-top:20px;">📋 持倉總覽</h3>
@@ -405,11 +612,12 @@ class GmailNotifier:
             <tr style="background:#343a40;color:#fff;">
                 <th style="padding:7px 8px;text-align:left;">標的</th>
                 <th style="padding:7px 8px;text-align:left;">板塊</th>
+                <th style="padding:7px 8px;">批次</th>
                 <th style="padding:7px 8px;">股數</th>
                 <th style="padding:7px 8px;">現價</th>
-                <th style="padding:7px 8px;">成本</th>
+                <th style="padding:7px 8px;">進場成本</th>
                 <th style="padding:7px 8px;">P&amp;L</th>
-                <th style="padding:7px 8px;">進場高點</th>
+                <th style="padding:7px 8px;">保護期</th>
                 <th style="padding:7px 8px;">距高</th>
                 <th style="padding:7px 8px;">動能</th>
                 <th style="padding:7px 8px;">趨勢</th>
@@ -418,7 +626,7 @@ class GmailNotifier:
             {portfolio_rows}
         </table>
         <p style="font-size:11px;color:#6c757d;margin:4px 0 0 0;">
-            🔴 EXIT &nbsp;|&nbsp; 🟠 ROTATE/動能負 &nbsp;|&nbsp; 🟡 接近停損 &nbsp;|&nbsp; 🟢 動能強+轉強 &nbsp;|&nbsp; 🟣 安全TOPUP機會
+            🔴 EXIT &nbsp;|&nbsp; 🟠 ROTATE/動能負 &nbsp;|&nbsp; 🟡 接近停損 &nbsp;|&nbsp; 🟢 動能強+轉強 &nbsp;|&nbsp; 保護期=不觸發逐批停損
         </p>'''
 
         exits_html = ""
@@ -428,13 +636,16 @@ class GmailNotifier:
                 pnl = a.get("pnl_pct", 0)
                 pnl_color = "#28a745" if pnl and pnl >= 0 else "#dc3545"
                 pnl_str = f"{pnl:+.1f}%" if pnl is not None else "N/A"
-                rows += f'<tr><td>{a["symbol"]}</td><td>{a.get("shares", 0)} 股</td><td style="color:{pnl_color}">{pnl_str}</td><td>{a.get("reason", "")}</td></tr>'
+                tranche_str = f" 第{a['tranche_n']}批" if a.get("tranche_n") else ""
+                rows += f'<tr><td>{a["symbol"]}{tranche_str}</td><td>{a.get("shares", 0)} 股</td><td style="color:{pnl_color}">{pnl_str}</td><td>{a.get("reason", "")}</td></tr>'
             exits_html = f'''
-            <h3 style="color:#dc3545;">EXIT 建議 ({len(exits)} 檔)</h3>
+            <div class="section-block">
+            <h3 style="color:#dc3545;">EXIT 建議 ({len(exits)} 筆)</h3>
             <table style="border-collapse:collapse;width:100%;">
                 <tr style="background:#f8f9fa;"><th style="text-align:left;padding:8px;">標的</th><th>股數</th><th>P&L</th><th>原因</th></tr>
                 {rows}
-            </table>'''
+            </table>
+            </div>'''
 
         holds_html = ""
         if holds:
@@ -450,71 +661,74 @@ class GmailNotifier:
             symbols = ", ".join(hold_parts)
             holds_html = f'<h3 style="color:#6c757d;">HOLD ({len(holds)} 檔)</h3><p>{symbols}</p>'
 
-        safe_topups = data.get("safe_topups", [])
         adds_html = ""
-        if adds or safe_topups or backup_adds:
-            rows = ""
-            for a in adds:
-                momentum = f"+{a.get('momentum', 0):.1f}%" if a.get("momentum") else ""
-                shares = a.get("suggested_shares", 0)
-                price = a.get("current_price", 0)
+        if new_adds or pyramid_adds or backup_adds:
 
-                rsi_html = "<td></td>"
+            def _add_rsi_html(a):
                 rsi = a.get("rsi")
                 if rsi is not None and rsi > 80:
-                    rsi_html = f'<td style="color:#dc3545;">🔴 {rsi:.0f}</td>'
-                elif rsi is not None and rsi > 75:
-                    rsi_html = f'<td style="color:#fd7e14;">🟡 {rsi:.0f}</td>'
-                elif rsi is not None:
-                    rsi_html = f'<td style="color:#28a745;">{rsi:.0f}</td>'
+                    return f'<td style="color:#dc3545;">🔴 {rsi:.0f}</td>'
+                if rsi is not None and rsi > 75:
+                    return f'<td style="color:#fd7e14;">🟡 {rsi:.0f}</td>'
+                if rsi is not None:
+                    return f'<td style="color:#28a745;">{rsi:.0f}</td>'
+                return "<td></td>"
 
-                alpha_html = "<td></td><td></td>"
+            def _add_alpha_html(a):
                 alpha_1y = a.get("alpha_1y")
                 alpha_3y = a.get("alpha_3y")
-                if alpha_1y is not None:
-                    alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
-                    alpha_3y_str = ""
-                    if alpha_3y is not None:
-                        alpha_3y_emoji = "🟢" if alpha_3y > 0 else ("🟡" if alpha_3y > -20 else "🔴")
-                        alpha_3y_str = f"<td>{alpha_3y_emoji} {alpha_3y:+.0f}%</td>"
-                    else:
-                        alpha_3y_str = "<td></td>"
-                    alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>{alpha_3y_str}"
+                if alpha_1y is None:
+                    return "<td></td><td></td>"
+                e1 = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
+                if alpha_3y is not None:
+                    e3 = "🟢" if alpha_3y > 0 else ("🟡" if alpha_3y > -20 else "🔴")
+                    td3 = f"<td>{e3} {alpha_3y:+.0f}%</td>"
+                else:
+                    td3 = "<td></td>"
+                return f"<td>{e1} {alpha_1y:+.0f}%</td>{td3}"
 
-                shares_str = str(shares)
-                post_rotate = a.get("suggested_shares_post_rotate")
-                if post_rotate is not None and post_rotate != shares:
-                    shares_str += f'<br><span style="color:#fd7e14;font-size:11px;">ROTATE後 {post_rotate} 股</span>'
+            rows = ""
+            # 新倉 + 金字塔：依排名升序排序
+            primary = sorted(new_adds + pyramid_adds, key=lambda x: x.get("momentum_rank") or 9999)
+            for a in primary:
+                price = a.get("current_price", 0)
+                momentum = f"+{a.get('momentum', 0):.1f}%"
+                rank = a.get("momentum_rank", "?")
+                rsi_html = _add_rsi_html(a)
+                alpha_html = _add_alpha_html(a)
                 sector_td = f'<td style="font-size:11px;color:#6c757d;">{a.get("sector") or "—"}</td>'
-                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
 
-            for s in safe_topups:
-                momentum = f"+{s.get('momentum', 0):.1f}%(#{s.get('momentum_rank', '?')})"
-                alpha_html = "<td></td><td></td>"
-                if s.get("alpha_1y") is not None:
-                    alpha_emoji = "🟢" if s["alpha_1y"] > 0 else ("🟡" if s["alpha_1y"] > -20 else "🔴")
-                    alpha_html = f"<td>{alpha_emoji} {s['alpha_1y']:+.0f}%</td><td></td>"
-                rows += f'<tr style="background:#f0fff0;"><td style="color:#28a745;">增持</td><td><strong>{s["symbol"]}</strong></td><td></td><td>+{s["topup_shares"]} 股<br><span style="font-size:11px;color:#28a745;">{s["current_weight_pct"]:.1f}%→等權重 🟢</span></td><td>${s["current_price"]:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
+                if a.get("is_pyramid"):
+                    direction_arrow = "↑" if a.get("direction") == "up" else "↓"
+                    tranche_label = f'<span style="color:#0d6efd;">{direction_arrow}第{a["tranche_n"]}批</span>'
+                    shares_str = str(a.get("suggested_shares", 0))
+                    post_rotate = a.get("suggested_shares_post_rotate")
+                    if post_rotate is not None and post_rotate != a.get("suggested_shares", 0):
+                        shares_str += f'<br><span style="color:#fd7e14;font-size:11px;">ROTATE後 {post_rotate} 股</span>'
+                    rows += f'<tr style="background:#e8f4ff;"><td>#{rank}</td><td><strong>{a["symbol"]}</strong> {tranche_label}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
+                else:
+                    shares_str = str(a.get("suggested_shares", 0))
+                    post_rotate = a.get("suggested_shares_post_rotate")
+                    if post_rotate is not None and post_rotate != a.get("suggested_shares", 0):
+                        shares_str += f'<br><span style="color:#fd7e14;font-size:11px;">ROTATE後 {post_rotate} 股</span>'
+                    rows += f'<tr><td>#{rank}</td><td>{a["symbol"]}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
 
             for a in backup_adds:
-                momentum = f"+{a.get('momentum', 0):.1f}%"
                 price = a.get("current_price", 0)
-                alpha_html = "<td></td><td></td>"
-                alpha_1y = a.get("alpha_1y")
-                alpha_3y = a.get("alpha_3y")
-                if alpha_1y is not None:
-                    alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
-                    alpha_3y_str = f"<td>{'🟢' if alpha_3y and alpha_3y > 0 else ('🟡' if alpha_3y and alpha_3y > -20 else '🔴')} {alpha_3y:+.0f}%</td>" if alpha_3y is not None else "<td></td>"
-                    alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>{alpha_3y_str}"
+                momentum = f"+{a.get('momentum', 0):.1f}%"
+                rsi_html = _add_rsi_html(a)
+                alpha_html = _add_alpha_html(a)
                 sector_td = f'<td style="font-size:11px;color:#6c757d;">{a.get("sector") or "—"}</td>'
-                rows += f'<tr style="background:#fff9e6;"><td style="color:#856404;">備#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td>{sector_td}<td style="color:#6c757d;font-size:11px;">備選參考</td><td>${price:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
+                rows += f'<tr style="background:#fff9e6;"><td style="color:#856404;">備#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td>{sector_td}<td style="color:#6c757d;font-size:11px;">備選參考</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
 
             adds_html = f'''
-            <h3 style="color:#28a745;">ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持 + {len(backup_adds)} 備選)</h3>
+            <div class="section-block">
+            <h3 style="color:#28a745;">ADD 建議 ({len(new_adds)} 新倉 + {len(pyramid_adds)} 金字塔 + {len(backup_adds)} 備選)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;">類型</th><th>標的</th><th>板塊</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;text-align:left;">排名</th><th style="text-align:left;">標的</th><th style="text-align:left;">板塊</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th></tr>
                 {rows}
-            </table>'''
+            </table>
+            </div>'''
 
         # ROTATE 建議（汰弱留強）
         rotates = [a for a in actions if a["action"] == "ROTATE"]
@@ -553,35 +767,15 @@ class GmailNotifier:
                     <td>{alpha_3y_str}</td>
                 </tr>'''
             rotates_html = f'''
+            <div class="section-block">
             <h3 style="color:#fd7e14;">ROTATE 建議（汰弱留強）({len(rotates)} 組)</h3>
             <table style="border-collapse:collapse;width:100%;">
                 <tr style="background:#f8f9fa;"><th style="padding:8px;">賣出</th><th>板塊</th><th>股數</th><th>動能</th><th>P&L</th><th>買入</th><th>板塊</th><th>股數</th><th>動能</th><th>1Y</th><th>3Y</th></tr>
                 {rows}
-            </table>'''
+            </table>
+            </div>'''
 
-        # TOPUP 增持參考
-        topups = data.get("topup_suggestions", [])
         topups_html = ""
-        if topups:
-            rows = ""
-            for s in topups:
-                safety_color = "#28a745" if "安全" in s["safety"] else ("#fd7e14" if "謹慎" in s["safety"] else "#dc3545")
-                rows += f'''<tr style="border-bottom:1px solid #eee;">
-                    <td style="padding:6px;"><strong>{s["symbol"]}</strong></td>
-                    <td>{s["current_weight_pct"]:.1f}%</td>
-                    <td>+{s["momentum"]:.1f}% (#{s["momentum_rank"]})</td>
-                    <td>{s["run_up_pct"]:+.1f}%</td>
-                    <td style="color:{safety_color};">{s["safety"]}</td>
-                    <td>${s["current_price"]:.2f}</td>
-                    <td>${s["avg_price"]:.2f}</td>
-                    <td>${s["new_stop"]:.2f}</td>
-                </tr>'''
-            topups_html = f'''
-            <h3 style="color:#6f42c1;">TOPUP 增持參考（倉位&lt;2%、動能強、趨勢轉強）</h3>
-            <table style="border-collapse:collapse;width:100%;font-size:13px;">
-                <tr style="background:#f8f9fa;"><th style="padding:6px;text-align:left;">標的</th><th>倉位</th><th>動能</th><th>追高</th><th>安全度</th><th>現價</th><th>成本</th><th>新停損</th></tr>
-                {rows}
-            </table>'''
 
         # 需注意
         watch_items = []
@@ -635,7 +829,7 @@ class GmailNotifier:
 
         html = f'''
         <html>
-        <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+        <body style="font-family:Arial,sans-serif;padding:16px;color:#333;">
             <h2>盤前報告 {data["date"]}</h2>
             <p style="color:#6c757d;">版本 {data.get("version", "N/A")}</p>
 

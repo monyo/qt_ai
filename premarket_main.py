@@ -14,8 +14,8 @@ from src.portfolio import (
 )
 from src.data_loader import get_sp500_tickers, fetch_current_prices, get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map
 from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
-from src.risk import check_position_limit
-from src.premarket import generate_actions, generate_topup_suggestions, VERSION
+from src.risk import check_position_limit, TRANCHE_PARAMS
+from src.premarket import generate_actions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
 from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_alpha_3y_batch, calculate_trend_state_batch
@@ -203,8 +203,9 @@ def run_premarket(scan_tw=False):
     alpha_symbols = list(set(add_candidates + held_symbols))
     print(f"正在計算 {len(alpha_symbols)} 檔標的的 1 年超額報酬...")
     alpha_1y_map = calculate_alpha_batch(alpha_symbols)
-    print(f"正在計算 {len(add_candidates)} 檔 ADD 候選的 3 年超額報酬...")
-    alpha_3y_map = calculate_alpha_3y_batch(add_candidates)
+    alpha_3y_symbols = list(set(add_candidates + held_symbols))
+    print(f"正在計算 {len(alpha_3y_symbols)} 檔標的的 3 年超額報酬（ADD 候選 + 持倉）...")
+    alpha_3y_map = calculate_alpha_3y_batch(alpha_3y_symbols)
 
     # 4.8 計算持倉趨勢狀態（V轉/倒V/盤整）
     print(f"正在計算 {len(held_symbols)} 檔持倉的趨勢狀態...")
@@ -213,40 +214,17 @@ def run_premarket(scan_tw=False):
     # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態 + 市場體制）
     actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map, market_regime=regime["regime"])
 
-    # 5.5 增持參考（倉位偏小 + 動能強 + 趨勢轉強）
-    total_value_for_topup = portfolio.get("cash", 0) + sum(
-        current_prices.get(sym, pos["avg_price"]) * pos["shares"]
-        for sym, pos in positions.items()
-    )
-    topup_suggestions = generate_topup_suggestions(
-        portfolio, current_prices, momentum_ranks, alpha_1y_map, trend_state_map, total_value_for_topup, alpha_3y_map
-    )
-
-    # 5.6 篩選「安全」TOPUP，計算補到等權重所需股數
+    # 5.5 重算 ROTATE 後的 ADD 股數（新倉 + 金字塔共用，備選不占位）
     CASH_SAFETY_FACTOR = 0.85
-    equal_weight = total_value_for_topup / 30
-    safe_topups = []
-    for s in topup_suggestions:
-        if "安全" not in s.get("safety", ""):
-            continue
-        current_val = s["current_price"] * s["shares"]
-        needed = max(0, equal_weight - current_val)
-        topup_shares = math.floor(needed / s["current_price"]) if s["current_price"] > 0 else 0
-        topup_cost = topup_shares * s["current_price"]
-        if topup_shares > 0:
-            safe_topups.append({**s, "topup_shares": topup_shares, "topup_cost": topup_cost})
-
-    # 5.7 重算 ROTATE 後的 ADD 股數（扣除安全 TOPUP 預算）
-    # 只算主清單（非備選），備選 suggested_shares=0 不參與現金分配
-    adds_list = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup", False)]
+    new_adds_list = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup", False) and not a.get("is_pyramid", False)]
+    pyramid_adds_list = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid", False)]
     rotates_list = [a for a in actions if a["action"] == "ROTATE"]
     rotate_proceeds = sum(a["sell_shares"] * a["sell_price"] * CASH_SAFETY_FACTOR for a in rotates_list)
     post_rotate_cash = portfolio.get("cash", 0) + rotate_proceeds
-    topup_total_cost = sum(s["topup_cost"] for s in safe_topups)
-    remaining_for_add = max(0, post_rotate_cash - topup_total_cost)
-    if adds_list:
-        post_rotate_per_slot = remaining_for_add / len(adds_list)
-        for a in adds_list:
+    buying_slots = new_adds_list + pyramid_adds_list
+    if buying_slots:
+        post_rotate_per_slot = post_rotate_cash / len(buying_slots)
+        for a in buying_slots:
             price = a.get("current_price", 0)
             if price > 0:
                 a["suggested_shares_post_rotate"] = math.floor(post_rotate_per_slot / price)
@@ -289,8 +267,6 @@ def run_premarket(scan_tw=False):
             "tech_ratio": sector_exposure["tech_ratio"],
         },
         "actions": actions,
-        "topup_suggestions": topup_suggestions,
-        "safe_topups": safe_topups,
     }
 
     actions_path = f"data/actions_{today_str}.json"
@@ -344,19 +320,23 @@ def run_premarket(scan_tw=False):
     # 分類印出
     exits = [a for a in actions if a["action"] == "EXIT"]
     holds = [a for a in actions if a["action"] == "HOLD"]
-    adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
+    new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
+    pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid")]
     backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
+    adds = new_adds  # 向下相容
 
     if exits:
         print("--- EXIT (建議出場) ---")
         for a in exits:
             pnl = f"{a['pnl_pct']:+.2f}%" if a.get("pnl_pct") is not None else "N/A"
-            print(f"  [{a['source']}] {a['symbol']:<6} {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {pnl}")
+            tranche_str = f" 第{a['tranche_n']}批" if a.get("tranche_n") else ""
+            print(f"  [{a['source']}] {a['symbol']:<6}{tranche_str} {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {pnl}")
             print(f"         原因: {a['reason']}")
         print()
 
     if holds:
         print("--- HOLD (繼續持有) ---")
+        today = date.today()
         for a in holds:
             pnl = f"{a['pnl_pct']:+.2f}%" if a.get("pnl_pct") is not None else "N/A"
             momentum = f"動能: {a['momentum']:+.1f}%" if a.get("momentum") is not None else ""
@@ -387,14 +367,42 @@ def run_premarket(scan_tw=False):
                     trail_str = f"  🔴追蹤{from_high:.0f}%"
                 elif from_high <= -10:
                     trail_str = f"  🟡追蹤{from_high:.0f}%"
+            # 保護期（單批次：inline；多批次：分行）
+            tranches = a.get("tranches", [])
+            protect_inline = ""
+            if len(tranches) == 1:
+                t = tranches[0]
+                try:
+                    days_held = (today - date.fromisoformat(t["entry_date"])).days
+                except (ValueError, KeyError):
+                    days_held = 999
+                params = TRANCHE_PARAMS.get(t.get("stop_type", "standard"), TRANCHE_PARAMS["standard"])
+                days_left = params["protect"] - days_held
+                protect_inline = f"  [保護中{days_left}天]" if days_left > 0 else "  [可出場]"
             tag = "[core]" if a["source"] == "core_hold" else "      "
             sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
-            print(f"  {tag} {a['symbol']}{sector_tag}  {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}{trail_str}")
+            print(f"  {tag} {a['symbol']}{sector_tag}  {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}{trail_str}{protect_inline}")
+            # 多批次：逐批顯示保護期
+            if len(tranches) > 1:
+                stop_labels = {"standard": "標準", "tight_2": "↑緊", "tight_3": "↑↑緊"}
+                for i, t in enumerate(tranches):
+                    prefix = "  └" if i == len(tranches) - 1 else "  ├"
+                    try:
+                        days_held = (today - date.fromisoformat(t["entry_date"])).days
+                    except (ValueError, KeyError):
+                        days_held = 999
+                    params = TRANCHE_PARAMS.get(t.get("stop_type", "standard"), TRANCHE_PARAMS["standard"])
+                    days_left = params["protect"] - days_held
+                    protect_str = f"保護中{days_left}天" if days_left > 0 else "可出場"
+                    stop_label = stop_labels.get(t.get("stop_type", "standard"), "")
+                    t_pnl = (price - t["entry_price"]) / t["entry_price"] * 100 if price and t["entry_price"] else None
+                    t_pnl_str = f"{t_pnl:+.1f}%" if t_pnl is not None else "N/A"
+                    print(f"         {prefix} 批{t['n']}({stop_label}) {t['shares']:>3}股 @${t['entry_price']:.0f}  P&L:{t_pnl_str:>7}  {protect_str}")
         print()
 
-    if adds or safe_topups or backup_adds:
-        print("--- ADD / TOPUP 建議 ---")
-        for a in adds:
+    if new_adds or pyramid_adds or backup_adds:
+        print("--- ADD 建議 ---")
+        for a in new_adds:
             momentum_str = f"動能: +{a.get('momentum', 0):.1f}%"
             alpha_1y = a.get('alpha_1y')
             alpha_3y = a.get('alpha_3y')
@@ -413,6 +421,21 @@ def run_premarket(scan_tw=False):
             sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
             print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
             print(f"         原因: {a['reason']}")
+        if pyramid_adds:
+            print("  --- 金字塔加碼（持倉加碼）---")
+            for a in pyramid_adds:
+                momentum_str = f"動能: +{a.get('momentum', 0):.1f}%"
+                alpha_1y = a.get('alpha_1y')
+                alpha_str = f"  1Y: {alpha_1y:+.0f}%" if alpha_1y is not None else ""
+                direction_arrow = "↑" if a.get("direction") == "up" else "↓"
+                stop_type = a.get("stop_type", "standard")
+                sector_tag = f"[{a.get('sector', '')}]" if a.get('sector') else ""
+                post_rotate_shares = a.get('suggested_shares_post_rotate')
+                shares_str = str(a['suggested_shares'])
+                if post_rotate_shares is not None and post_rotate_shares != a['suggested_shares']:
+                    shares_str += f" (ROTATE後 {post_rotate_shares} 股)"
+                print(f"  [{direction_arrow}第{a['tranche_n']}批] {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
+                print(f"         原因: {a['reason']}")
         if backup_adds:
             print("  --- 備選（可替換 1Y/3Y alpha 差的主要候選）---")
             for a in backup_adds:
@@ -430,12 +453,6 @@ def run_premarket(scan_tw=False):
                 sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
                 print(f"  [備#{a.get('momentum_rank', '?')}] {a['symbol']}{sector_tag}  @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
                 print(f"           原因: {a['reason']}")
-        for s in safe_topups:
-            weight_after = (s["current_price"] * (s["shares"] + s["topup_shares"])) / total_value_for_topup * 100
-            momentum_str = f"動能: +{s['momentum']:.1f}%(#{s['momentum_rank']})"
-            alpha = s.get("alpha_1y")
-            alpha_str = f"  1Y: {alpha:+.0f}%" if alpha is not None else ""
-            print(f"  [增持] {s['symbol']:<6} +{s['topup_shares']} 股 @ ${s['current_price']:.2f}  {momentum_str}  倉位 {s['current_weight_pct']:.1f}%→{weight_after:.1f}%  {s['safety']}{alpha_str}")
         print()
 
     # ROTATE 建議（汰弱留強）
@@ -460,19 +477,6 @@ def run_premarket(scan_tw=False):
             print(f"  → 買 {a['buy_symbol']}{buy_sector_tag}  {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
             print(f"       動能差: +{a['momentum_diff']:.0f}%  {a['reason']}")
             print()
-
-    # 增持參考（非安全，僅供參考）
-    non_safe_topups = [s for s in topup_suggestions if "安全" not in s.get("safety", "")]
-    if non_safe_topups:
-        print("--- TOPUP 增持參考（風險較高，僅供參考）---")
-        for s in non_safe_topups:
-            ts = s["trend_state"]
-            ts_str = f"↗️轉強(反彈{ts['bounce_pct']:+.0f}%)" if ts else ""
-            alpha = s.get("alpha_1y")
-            alpha_str = f"  1Y: {alpha:+.0f}%" if alpha is not None else ""
-            print(f"  {s['symbol']:<6} 倉位{s['current_weight_pct']:.1f}%  動能+{s['momentum']:.1f}%(#{s['momentum_rank']})  {ts_str}")
-            print(f"         現價${s['current_price']:.2f}  成本${s['avg_price']:.2f}  追高{s['run_up_pct']:+.1f}%  {s['safety']}  {s['safety_note']}{alpha_str}")
-        print()
 
     # === 台股觀察（全市場掃描，需加 --tw 開啟）===
     if scan_tw:

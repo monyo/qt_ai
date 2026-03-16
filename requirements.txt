@@ -15,3 +15,6 @@ python-dotenv>=1.2.1
 
 # 繪圖與視覺化
 matplotlib>=3.10.8
+
+# PDF 生成
+weasyprint>=68.0

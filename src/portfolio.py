@@ -40,6 +40,20 @@ def calc_avg_price(current_avg, current_shares, new_price, new_shares):
     return total_cost / total_shares
 
 
+def _ensure_tranches(pos):
+    """Lazy 遷移：確保 pos 有 tranches 欄位（舊有持倉自動補上 tranche 1）"""
+    if "tranches" not in pos:
+        pos["tranches"] = [{
+            "n": 1,
+            "shares": pos["shares"],
+            "entry_price": pos["avg_price"],
+            "entry_date": pos.get("first_entry", "unknown"),
+            "high": pos.get("high_since_entry", pos["avg_price"]),
+            "stop_type": "standard",
+        }]
+    return pos
+
+
 def apply_confirmed_actions(portfolio, confirmed_actions):
     """套用 confirmed actions，更新 positions + 追加 transactions"""
     for action in confirmed_actions:
@@ -56,22 +70,43 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
             if shares <= 0:
                 continue
 
+            stop_type = action.get("stop_type", "standard")
+
             if symbol in portfolio["positions"]:
                 pos = portfolio["positions"][symbol]
+                # 先確保 tranches 存在（使用更新前的 avg_price 做 lazy migrate）
+                _ensure_tranches(pos)
                 pos["avg_price"] = calc_avg_price(
                     pos["avg_price"], pos["shares"], price, shares
                 )
                 pos["shares"] += shares
                 pos["cost_basis"] = pos["avg_price"] * pos["shares"]
+                # 追加新批次
+                n_next = max((t["n"] for t in pos["tranches"]), default=0) + 1
+                pos["tranches"].append({
+                    "n": n_next,
+                    "shares": shares,
+                    "entry_price": price,
+                    "entry_date": tx_date,
+                    "high": price,
+                    "stop_type": stop_type,
+                })
             else:
-                cost_basis = price * shares
                 portfolio["positions"][symbol] = {
                     "shares": shares,
                     "avg_price": price,
-                    "cost_basis": cost_basis,
+                    "cost_basis": price * shares,
                     "first_entry": tx_date,
                     "high_since_entry": price,
                     "core": False,
+                    "tranches": [{
+                        "n": 1,
+                        "shares": shares,
+                        "entry_price": price,
+                        "entry_date": tx_date,
+                        "high": price,
+                        "stop_type": stop_type,
+                    }],
                 }
 
             portfolio["cash"] -= price * shares
@@ -84,16 +119,48 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
             symbol = action["symbol"]
             shares = action.get("actual_shares", action.get("shares", 0))
             price = action.get("actual_price", action["current_price"])
+            tranche_n = action.get("tranche_n")
             if shares <= 0:
                 continue
 
             if symbol in portfolio["positions"]:
                 pos = portfolio["positions"][symbol]
-                if shares >= pos["shares"]:
-                    del portfolio["positions"][symbol]
+
+                if tranche_n is not None and "tranches" in pos:
+                    # 逐批出場：找到對應批次
+                    tranche_idx = next(
+                        (i for i, t in enumerate(pos["tranches"]) if t["n"] == tranche_n), None
+                    )
+                    if tranche_idx is not None:
+                        t = pos["tranches"][tranche_idx]
+                        actual_exit_shares = min(shares, t["shares"])
+                        # 重算剩餘 avg_price（用批次進場成本移除，非市場成交價）
+                        removed_cost = t["entry_price"] * actual_exit_shares
+                        if actual_exit_shares >= t["shares"]:
+                            pos["tranches"].pop(tranche_idx)
+                        else:
+                            t["shares"] -= actual_exit_shares
+                        pos["shares"] = sum(tr["shares"] for tr in pos["tranches"])
+                        if pos["shares"] <= 0 or not pos["tranches"]:
+                            del portfolio["positions"][symbol]
+                        else:
+                            remaining_cost = pos["avg_price"] * (pos["shares"] + actual_exit_shares) - removed_cost
+                            pos["avg_price"] = remaining_cost / pos["shares"] if pos["shares"] > 0 else 0
+                            pos["cost_basis"] = pos["avg_price"] * pos["shares"]
+                    else:
+                        # tranche 找不到，退化為標準出場
+                        if shares >= pos["shares"]:
+                            del portfolio["positions"][symbol]
+                        else:
+                            pos["shares"] -= shares
+                            pos["cost_basis"] = pos["avg_price"] * pos["shares"]
                 else:
-                    pos["shares"] -= shares
-                    pos["cost_basis"] = pos["avg_price"] * pos["shares"]
+                    # 標準出場（全部或部分）
+                    if shares >= pos["shares"]:
+                        del portfolio["positions"][symbol]
+                    else:
+                        pos["shares"] -= shares
+                        pos["cost_basis"] = pos["avg_price"] * pos["shares"]
 
             portfolio["cash"] += price * shares
             portfolio["transactions"].append({
@@ -200,6 +267,14 @@ def update_high_prices(portfolio, current_prices):
         elif price > current_high:
             pos["high_since_entry"] = price
             updated = True
+
+        # 同步更新各批次高點
+        if "tranches" in pos:
+            pos_high = pos["high_since_entry"]
+            for t in pos["tranches"]:
+                if pos_high > t.get("high", 0):
+                    t["high"] = pos_high
+                    updated = True
 
     return updated
 

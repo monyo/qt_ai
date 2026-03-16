@@ -1,12 +1,17 @@
 import math
 from datetime import date
-from src.risk import check_all_exit_conditions, check_position_limit
+from src.risk import check_all_exit_conditions, check_position_limit, TRANCHE_PARAMS
+from src.portfolio import _ensure_tranches
 
-VERSION = "0.9.0"  # 混合動能 50/50（21天+252天），回測 CAGR +62% vs 純21天 +48%
+VERSION = "0.10.0"  # 金字塔加碼策略（差異停損），取代 TOPUP 機制
 
 # 汰弱留強參數（參考學術研究的定期重新排名邏輯）
 ROTATE_MOMENTUM_DIFF = 10      # 動能差距門檻 (%)，從 20% 降至 10%
 ROTATE_HOLDING_DAYS_MIN = 30   # 最少持有天數，從 60 天降至 30 天
+
+# 金字塔加碼參數
+MAX_PYRAMID = 5       # 最大批次數（同回測最佳參數）
+MAX_PYRAMID_SHOW = 3  # 每日最多顯示的金字塔加碼建議數
 
 
 def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None, trend_state_map=None, alpha_3y_map=None, market_regime="BULL"):
@@ -60,8 +65,6 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         if price is not None and pos["avg_price"] > 0:
             pnl_pct = round((price - pos["avg_price"]) / pos["avg_price"] * 100, 2)
 
-        action_id += 1
-
         # 取得該持倉的動能資訊
         m_info = momentum_map.get(symbol, {})
         momentum = m_info.get("momentum")
@@ -79,6 +82,8 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
 
         if pos.get("core", False):
             # 核心持倉：永遠 HOLD
+            action_id += 1
+            _ensure_tranches(pos)
             actions.append({
                 "id": action_id,
                 "action": "HOLD",
@@ -94,26 +99,29 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "reason": "核心持倉",
                 "source": "core_hold",
                 "status": "auto",
+                "tranches": pos["tranches"],
             })
         elif symbol in exit_signals:
-            # 觸發出場條件
-            exit_info = exit_signals[symbol]
-            actions.append({
-                "id": action_id,
-                "action": "EXIT",
-                "symbol": symbol,
-                "shares": pos["shares"],
-                "current_price": price,
-                "avg_price": pos["avg_price"],
-                "high_since_entry": high_price,
-                "pnl_pct": pnl_pct,
-                "momentum": momentum,
-                "alpha_1y": alpha_1y,
-                "trend_state": trend_state,
-                "reason": exit_info["message"],
-                "source": exit_info["reason"],
-                "status": "pending",
-            })
+            # 逐批出場：為每個觸發批次建立 EXIT action
+            for exit_item in exit_signals[symbol]:
+                action_id += 1
+                actions.append({
+                    "id": action_id,
+                    "action": "EXIT",
+                    "symbol": symbol,
+                    "shares": exit_item["tranche_shares"],
+                    "tranche_n": exit_item["tranche_n"],
+                    "current_price": price,
+                    "avg_price": pos["avg_price"],
+                    "high_since_entry": high_price,
+                    "pnl_pct": pnl_pct,
+                    "momentum": momentum,
+                    "alpha_1y": alpha_1y,
+                    "trend_state": trend_state,
+                    "reason": exit_item["message"],
+                    "source": exit_item["reason"],
+                    "status": "pending",
+                })
         else:
             # 繼續持有（讓獲利奔跑）
             reason = "持有中"
@@ -132,6 +140,8 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 elif trend_state["state"] == "轉強" and (momentum is not None and momentum < 0):
                     reason += " 💡 V轉回升中"
 
+            action_id += 1
+            _ensure_tranches(pos)
             actions.append({
                 "id": action_id,
                 "action": "HOLD",
@@ -148,6 +158,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "reason": reason,
                 "source": "momentum",
                 "status": "auto",
+                "tranches": pos["tranches"],
             })
 
     # === 3. 新增買入候選（依動能排名，BEAR 市場暫停） ===
@@ -161,12 +172,19 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         current_prices.get(a["symbol"], 0) * a["shares"]
         for a in actions if a["action"] == "EXIT"
     )
-    exit_count = sum(1 for a in actions if a["action"] == "EXIT")
+    # 只有「完整出場」的 symbol 才釋放槽位（全部批次都觸發）
+    exit_symbols_full = set()
+    for sym, exit_list in exit_signals.items():
+        pos = positions.get(sym, {})
+        total_exit_shares = sum(item["tranche_shares"] for item in exit_list)
+        if total_exit_shares >= pos.get("shares", 0):
+            exit_symbols_full.add(sym)
+    exit_count = len(exit_symbols_full)
 
     current_cash = portfolio.get("cash", 0)
     projected_cash = current_cash + exit_proceeds * CASH_SAFETY_FACTOR
 
-    # 可用槽位 = 原本空位 + EXIT 釋放的位置
+    # 可用槽位 = 原本空位 + EXIT 完整釋放的位置
     base_slots = check_position_limit(portfolio)
     available_slots = base_slots + exit_count
 
@@ -218,17 +236,51 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             leftover_poor = supplement[needed:]
 
         num_to_add = min(TARGET_PRIMARY, available_slots, len(primary_pool))
-        if num_to_add > 0:
-            position_size = projected_cash / num_to_add
-        else:
-            position_size = 0
-
         primary_candidates = primary_pool[:num_to_add]
         backup_src = primary_pool[num_to_add:] + leftover_poor
         valid_backups = [
             m for m in backup_src
             if alpha_3y_map.get(m["symbol"]) is None or alpha_3y_map.get(m["symbol"]) >= 0
         ][:ADD_BACKUP]
+
+        # === 金字塔加碼候選（持倉中可加碼的） ===
+        exit_symbols_set = {a["symbol"] for a in actions if a["action"] == "EXIT"}
+        pyramid_candidates = []
+        for sym, p in positions.items():
+            if p.get("core") or sym in exit_symbols_set:
+                continue
+            _ensure_tranches(p)
+            if len(p["tranches"]) >= MAX_PYRAMID:
+                continue
+            mom = momentum_map.get(sym, {}).get("momentum")
+            if mom is None or mom <= 0:
+                continue
+            price_sym = current_prices.get(sym, 0)
+            if price_sym <= 0:
+                continue
+            latest = p["tranches"][-1]
+            direction = "up" if price_sym > latest["entry_price"] else "down"
+            n_next = len(p["tranches"]) + 1
+            stop_type = ("tight_2" if n_next == 2 else "tight_3") if direction == "up" else "standard"
+            pyramid_candidates.append({
+                "symbol": sym,
+                "momentum": mom,
+                "direction": direction,
+                "tranche_n": n_next,
+                "stop_type": stop_type,
+                "current_tranche_count": len(p["tranches"]),
+                "rank": momentum_map.get(sym, {}).get("rank"),
+            })
+        pyramid_candidates.sort(key=lambda x: x["momentum"], reverse=True)
+        pyramid_show = pyramid_candidates[:MAX_PYRAMID_SHOW]
+
+        # 計算 position_size：新倉 + 金字塔共用等額分配
+        total_buying_slots = num_to_add + len(pyramid_show)
+        if total_buying_slots > 0:
+            position_size = projected_cash / total_buying_slots
+        else:
+            position_size = 0
+
         candidates_to_show = [(m, False) for m in primary_candidates] + [(m, True) for m in valid_backups]
 
         for m, is_backup in candidates_to_show:
@@ -276,6 +328,47 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "is_backup": is_backup,
                 "reason": reason,
                 "source": "momentum",
+                "status": "pending",
+            })
+
+        # === 金字塔加碼 ADD actions ===
+        for pc in pyramid_show:
+            action_id += 1
+            sym = pc["symbol"]
+            price = current_prices.get(sym, 0)
+            stop_params = TRANCHE_PARAMS[pc["stop_type"]]
+            direction_arrow = "↑" if pc["direction"] == "up" else "↓"
+            suggested_shares = math.floor(position_size / price) if price > 0 and position_size > 0 else 0
+            if pc["direction"] == "up":
+                reason = (f"[持倉{direction_arrow}第{pc['tranche_n']}批] "
+                          f"動能 +{pc['momentum']:.1f}%  "
+                          f"差異停損({stop_params['fixed']*100:.0f}%/{stop_params['trailing']*100:.0f}%)")
+            else:
+                reason = (f"[持倉{direction_arrow}第{pc['tranche_n']}批] "
+                          f"動能 +{pc['momentum']:.1f}%  撿便宜加碼（標準停損）")
+            rsi = momentum_map.get(sym, {}).get("rsi")
+            if rsi is not None and rsi > RSI_EXTREME:
+                reason += f" 🔴 RSI {rsi:.0f} 極度超買"
+            elif rsi is not None and rsi > RSI_OVERBOUGHT:
+                reason += f" 🟡 RSI {rsi:.0f} 超買"
+            actions.append({
+                "id": action_id,
+                "action": "ADD",
+                "is_pyramid": True,
+                "tranche_n": pc["tranche_n"],
+                "stop_type": pc["stop_type"],
+                "direction": pc["direction"],
+                "symbol": sym,
+                "suggested_shares": suggested_shares,
+                "current_price": price,
+                "momentum": pc["momentum"],
+                "momentum_rank": pc["rank"],
+                "rsi": rsi,
+                "alpha_1y": alpha_1y_map.get(sym),
+                "alpha_3y": alpha_3y_map.get(sym),
+                "is_backup": False,
+                "reason": reason,
+                "source": "pyramid",
                 "status": "pending",
             })
 
@@ -385,88 +478,3 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                     a["suggested_shares_post_rotate"] = math.floor(post_rotate_position_size / price)
 
     return actions
-
-
-# 增持參考參數
-TOPUP_MOMENTUM_MIN = 15   # 最低動能門檻 (%)
-TOPUP_MAX_WEIGHT = 0.02   # 倉位比重上限（超過此比重不建議加碼）
-FIXED_STOP_LOSS = 0.85    # 停損係數（-15%）
-
-
-def generate_topup_suggestions(portfolio, current_prices, momentum_ranks, alpha_1y_map, trend_state_map, total_value, alpha_3y_map=None):
-    """掃描現有持倉，找出倉位偏小且值得加碼的標的
-
-    條件：非核心、動能 > 15%、趨勢轉強、倉位比重 < 2%
-    關鍵指標：追高幅度、加碼後新停損 vs 原始成本
-
-    Returns:
-        list of suggestion dicts，按動能排序
-    """
-    if alpha_3y_map is None:
-        alpha_3y_map = {}
-    suggestions = []
-    positions = portfolio.get("positions", {})
-    momentum_map = {m["symbol"]: m for m in momentum_ranks}
-
-    for symbol, pos in positions.items():
-        if pos.get("core", False):
-            continue
-
-        price = current_prices.get(symbol)
-        if not price or price <= 0:
-            continue
-
-        # 倉位比重過濾
-        current_weight = (price * pos["shares"]) / total_value if total_value > 0 else 0
-        if current_weight >= TOPUP_MAX_WEIGHT:
-            continue
-
-        # 動能過濾
-        m_info = momentum_map.get(symbol, {})
-        momentum = m_info.get("momentum")
-        if momentum is None or momentum < TOPUP_MOMENTUM_MIN:
-            continue
-
-        # 趨勢過濾（只建議轉強標的）
-        trend_state = trend_state_map.get(symbol, {})
-        if trend_state.get("state") != "轉強":
-            continue
-
-        # 追高風險評估
-        avg_price = pos["avg_price"]
-        run_up_pct = (price - avg_price) / avg_price * 100
-        new_stop = round(price * FIXED_STOP_LOSS, 2)
-        stop_vs_cost = new_stop - avg_price
-
-        stop_pct_vs_cost = stop_vs_cost / avg_price * 100  # 負數=停損低於成本多少%
-
-        if stop_vs_cost >= 0:
-            safety = "🟢 安全"
-            safety_note = f"停損${new_stop:.2f} 高於成本（原始獲利鎖住）"
-        elif stop_pct_vs_cost >= -8:
-            safety = "🟡 謹慎"
-            safety_note = f"停損${new_stop:.2f} 低於成本 {stop_pct_vs_cost:.1f}%（風險可控）"
-        else:
-            safety = "🔴 風險高"
-            safety_note = f"停損${new_stop:.2f} 低於成本 {stop_pct_vs_cost:.1f}%（原始成本曝險）"
-
-        suggestions.append({
-            "symbol": symbol,
-            "current_price": price,
-            "avg_price": avg_price,
-            "shares": pos["shares"],
-            "current_weight_pct": round(current_weight * 100, 1),
-            "run_up_pct": round(run_up_pct, 1),
-            "momentum": momentum,
-            "momentum_rank": m_info.get("rank"),
-            "trend_state": trend_state,
-            "new_stop": new_stop,
-            "stop_vs_cost": round(stop_vs_cost, 2),
-            "safety": safety,
-            "safety_note": safety_note,
-            "alpha_1y": alpha_1y_map.get(symbol),
-            "alpha_3y": alpha_3y_map.get(symbol),
-        })
-
-    suggestions.sort(key=lambda x: x["momentum"], reverse=True)
-    return suggestions

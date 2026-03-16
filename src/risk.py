@@ -1,3 +1,13 @@
+from datetime import date as _date
+from src.portfolio import _ensure_tranches
+
+TRANCHE_PARAMS = {
+    "standard": {"fixed": -0.15, "trailing": -0.25, "protect": 30},
+    "tight_2":  {"fixed": -0.10, "trailing": -0.15, "protect": 15},
+    "tight_3":  {"fixed": -0.07, "trailing": -0.10, "protect":  7},
+}
+
+
 def check_stop_loss(positions, current_prices, threshold=-0.35):
     """檢查持倉是否觸發極端停損（從成本價計算）
 
@@ -137,57 +147,106 @@ def check_ma200_stop(positions, current_prices, ma200_prices):
 def check_all_exit_conditions(positions, current_prices, ma200_prices,
                                fixed_threshold=-0.15, hard_threshold=-0.35,
                                trailing_pct=0.25):
-    """檢查所有出場條件，回傳需要出場的持倉
+    """逐批次檢查出場條件，回傳需要出場的持倉
 
-    優先順序：
-    1. 固定停損（-15% from cost）
-    2. 追蹤停損（從持倉最高點 -25%，回測 Calmar 0.882 vs 無追蹤 0.734）
-    3. MA200 停損
-    4. 極端停損（-35% from cost，備用防線）
+    每個 tranche 按各自的 stop_type 套用差異停損參數：
+    - standard: fixed -15%, trailing -25%, 保護 30 天（第1批 / 撿便宜加碼）
+    - tight_2:  fixed -10%, trailing -15%, 保護 15 天（上漲加碼第2批）
+    - tight_3:  fixed -7%,  trailing -10%, 保護 7 天（上漲加碼第3批+）
 
     Returns:
-        dict: {symbol: {"reason": str, "message": str, "details": dict}}
+        dict: {symbol: [{"tranche_n": int, "tranche_shares": int,
+                         "reason": str, "message": str, "details": dict}, ...]}
+        每個 symbol 的列表按 tranche_n 降序排列（先出最新批次）
     """
+    today = _date.today()
     exits = {}
 
-    # 1. 固定停損（從成本價 -15%）
-    fixed_stops = check_fixed_stop(positions, current_prices, fixed_threshold)
-    for item in fixed_stops:
-        exits[item["symbol"]] = {
-            "reason": "fixed_stop",
-            "message": f"固定停損觸發（成本 ${item['avg_price']:.2f}，停損價 ${item['stop_price']:.2f}，目前 {item['pnl_pct']:.1f}%）",
-            "details": item,
-        }
+    for symbol, pos in positions.items():
+        if pos.get("core", False):
+            continue
+        price = current_prices.get(symbol)
+        if price is None:
+            continue
 
-    # 2. 追蹤停損（從持倉最高點 -25%）
-    trailing_stops = check_trailing_stop(positions, current_prices, trailing_pct)
-    for item in trailing_stops:
-        if item["symbol"] not in exits:
-            exits[item["symbol"]] = {
-                "reason": "trailing_stop",
-                "message": f"追蹤停損觸發（最高 ${item['high_since_entry']:.2f}，回落 {item['from_high_pct']:.1f}%）",
-                "details": item,
-            }
+        _ensure_tranches(pos)
+        triggered = []
 
-    # 3. MA200 停損
-    ma200_stops = check_ma200_stop(positions, current_prices, ma200_prices)
-    for item in ma200_stops:
-        if item["symbol"] not in exits:
-            exits[item["symbol"]] = {
-                "reason": "ma200_stop",
-                "message": f"跌破 MA200（${item['ma200']:.2f}，目前 {item['below_pct']:.1f}%）",
-                "details": item,
-            }
+        for t in pos["tranches"]:
+            stop_type = t.get("stop_type", "standard")
+            params = TRANCHE_PARAMS.get(stop_type, TRANCHE_PARAMS["standard"])
 
-    # 4. 極端停損（最後防線）
-    hard_stops = check_stop_loss(positions, current_prices, hard_threshold)
-    for item in hard_stops:
-        if item["symbol"] not in exits:
-            exits[item["symbol"]] = {
-                "reason": "extreme_stop",
-                "message": f"極端停損觸發（從成本 {item['pnl_pct']:.1f}%）",
-                "details": item,
-            }
+            # 保護期檢查
+            try:
+                entry_date = _date.fromisoformat(t["entry_date"])
+                days_held = (today - entry_date).days
+            except (ValueError, KeyError):
+                days_held = 999
+
+            if days_held < params["protect"]:
+                continue
+
+            n = t["n"]
+            entry_price = t["entry_price"]
+            t_high = t.get("high", entry_price)
+            t_shares = t["shares"]
+
+            # 1. 固定停損（從批次進場成本）
+            fixed_stop_price = entry_price * (1 + params["fixed"])
+            if price <= fixed_stop_price:
+                triggered.append({
+                    "tranche_n": n,
+                    "tranche_shares": t_shares,
+                    "reason": "fixed_stop",
+                    "message": f"固定停損觸發（第{n}批，成本 ${entry_price:.2f}，停損 ${fixed_stop_price:.2f}，目前 {(price-entry_price)/entry_price*100:.1f}%）",
+                    "details": {"entry_price": entry_price, "stop_price": fixed_stop_price, "current_price": price},
+                })
+                continue
+
+            # 2. 追蹤停損（從批次最高點）
+            if t_high > 0:
+                trailing_stop_price = t_high * (1 + params["trailing"])
+                from_high = (price - t_high) / t_high
+                if price <= trailing_stop_price:
+                    triggered.append({
+                        "tranche_n": n,
+                        "tranche_shares": t_shares,
+                        "reason": "trailing_stop",
+                        "message": f"追蹤停損觸發（第{n}批，最高 ${t_high:.2f}，回落 {from_high*100:.1f}%）",
+                        "details": {"high": t_high, "trailing_stop": trailing_stop_price, "current_price": price},
+                    })
+                    continue
+
+            # 3. MA200 停損（僅 standard 批次）
+            if stop_type == "standard":
+                ma200 = ma200_prices.get(symbol)
+                if ma200 is not None and price < ma200:
+                    triggered.append({
+                        "tranche_n": n,
+                        "tranche_shares": t_shares,
+                        "reason": "ma200_stop",
+                        "message": f"跌破 MA200（第{n}批，MA200 ${ma200:.2f}，{(price-ma200)/ma200*100:.1f}%）",
+                        "details": {"ma200": ma200, "current_price": price},
+                    })
+                    continue
+
+                # 4. 極端停損（-35%，僅 standard，用整體 avg_price）
+                avg_price = pos.get("avg_price", entry_price)
+                if avg_price > 0:
+                    pnl_pct = (price - avg_price) / avg_price
+                    if pnl_pct <= hard_threshold:
+                        triggered.append({
+                            "tranche_n": n,
+                            "tranche_shares": t_shares,
+                            "reason": "extreme_stop",
+                            "message": f"極端停損觸發（第{n}批，從成本 {pnl_pct*100:.1f}%）",
+                            "details": {"avg_price": avg_price, "pnl_pct": pnl_pct, "current_price": price},
+                        })
+
+        if triggered:
+            # 按 tranche_n 降序（先出最新批次）
+            triggered.sort(key=lambda x: x["tranche_n"], reverse=True)
+            exits[symbol] = triggered
 
     return exits
 
