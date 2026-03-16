@@ -176,6 +176,17 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
 
     num_to_add = 0  # 供後續 post-rotate 計算使用
 
+    # Alpha 過濾：1Y > 0 AND 3Y > -30%（輕微落後視為宏觀打趴，允許進主清單）
+    # 同時用於 ADD 主清單 和 ROTATE 目標過濾
+    def _alpha_qualifies(sym):
+        a1y = alpha_1y_map.get(sym)
+        a3y = alpha_3y_map.get(sym)
+        if a1y is not None and a1y <= 0:
+            return False
+        if a3y is not None and a3y < -30:
+            return False
+        return True
+
     if available_slots > 0 and momentum_ranks:
         # 篩選：動能 > 0 + 尚未持有 + 不在 EXIT 名單
         exit_symbols = {a["symbol"] for a in actions if a["action"] == "EXIT"}
@@ -185,16 +196,6 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             and m["symbol"] not in positions
             and m["symbol"] not in exit_symbols
         ]
-
-        # 主清單過濾：1Y > 0 AND 3Y > -30%（輕微落後視為宏觀打趴，允許進主清單）
-        def _alpha_qualifies(sym):
-            a1y = alpha_1y_map.get(sym)
-            a3y = alpha_3y_map.get(sym)
-            if a1y is not None and a1y <= 0:
-                return False
-            if a3y is not None and a3y < -30:
-                return False
-            return True
 
         alpha_good = [m for m in buy_candidates if _alpha_qualifies(m["symbol"])]
         alpha_poor = [m for m in buy_candidates if not _alpha_qualifies(m["symbol"])]
@@ -308,12 +309,13 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
     # 按動能排序（最弱的在前）
     rotatable_positions.sort(key=lambda x: x[2] if x[2] is not None else 999)
 
-    # 找出所有強勢候選（不只是現金不足的）
+    # 找出所有強勢候選（不只是現金不足的）：同樣套用 alpha 過濾，排除結構衰退標的
     strong_candidates = [
         m for m in momentum_ranks
         if m.get("momentum", 0) > 0
         and m["symbol"] not in positions
         and m["symbol"] not in exit_symbols
+        and _alpha_qualifies(m["symbol"])
     ]
 
     # 對每個弱勢持倉，檢查是否有夠強的候選可換

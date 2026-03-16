@@ -34,22 +34,50 @@ def fetch_stock_data(symbol, period="3y", start=None, end=None):
 
     return df
     
-def get_sp500_tickers():
-    """從維基百科抓取 S&P 500 成份股代碼 (帶 User-Agent 偽裝)"""
+_SP500_DF_CACHE = None  # 快取 Wikipedia 表格，避免重複 HTTP 請求
+
+_SECTOR_ZH = {
+    "Information Technology": "科技",
+    "Health Care": "醫療",
+    "Financials": "金融",
+    "Consumer Discretionary": "非必需消費",
+    "Communication Services": "通訊",
+    "Industrials": "工業",
+    "Consumer Staples": "必需消費",
+    "Energy": "能源",
+    "Utilities": "公用事業",
+    "Real Estate": "房地產",
+    "Materials": "原物料",
+}
+
+
+def _get_sp500_df():
+    """取得 S&P 500 Wikipedia 表格（module-level 快取，整個 session 只抓一次）"""
+    global _SP500_DF_CACHE
+    if _SP500_DF_CACHE is not None:
+        return _SP500_DF_CACHE
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-    
-    # 模擬瀏覽器的 Header
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
-    
-    # 使用 requests 先把網頁抓下來
     response = requests.get(url, headers=headers)
-    
-    # 再讓 pandas 解析抓回來的 HTML 內容
     table = pd.read_html(StringIO(response.text))
-    df = table[0]
-    return df['Symbol'].tolist()
+    _SP500_DF_CACHE = table[0]
+    return _SP500_DF_CACHE
+
+
+def get_sp500_tickers():
+    """從維基百科抓取 S&P 500 成份股代碼"""
+    return _get_sp500_df()['Symbol'].tolist()
+
+
+def get_sp500_sector_map():
+    """返回 {symbol: 中文板塊名稱}，來源同 Wikipedia S&P 500 表格（共用快取）"""
+    df = _get_sp500_df()
+    return {
+        row['Symbol']: _SECTOR_ZH.get(row['GICS Sector'], row['GICS Sector'])
+        for _, row in df.iterrows()
+    }
 
 
 def fetch_current_prices(symbols):

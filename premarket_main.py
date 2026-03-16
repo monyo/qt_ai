@@ -12,7 +12,7 @@ from src.portfolio import (
     load_watchlist, save_watchlist, add_to_watchlist,
     update_high_prices, initialize_high_prices,
 )
-from src.data_loader import get_sp500_tickers, fetch_current_prices, get_tw50_tickers, TW_STOCK_NAMES
+from src.data_loader import get_sp500_tickers, fetch_current_prices, get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map
 from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
 from src.risk import check_position_limit
 from src.premarket import generate_actions, generate_topup_suggestions, VERSION
@@ -180,8 +180,8 @@ def run_premarket(scan_tw=False):
     # 3. 計算動能排名
     momentum_ranks = rank_by_momentum(all_tickers, period=21)
 
-    # 4. 取得報價（動能前 35 名 + 持倉，涵蓋主要候選+備選）
-    top_symbols = [m["symbol"] for m in momentum_ranks[:35]]
+    # 4. 取得報價（動能前 45 名 + 持倉，涵蓋主要候選+備選，緩衝持倉佔位）
+    top_symbols = [m["symbol"] for m in momentum_ranks[:45]]
     symbols_for_price = list(set(top_symbols + held_symbols))
     print(f"正在取得 {len(symbols_for_price)} 檔報價...")
     current_prices = fetch_current_prices(symbols_for_price)
@@ -198,8 +198,8 @@ def run_premarket(scan_tw=False):
         print("已更新持倉最高價記錄")
 
     # 4.7 計算 1 年超額報酬（ADD 候選 + 持倉，用於長期績效參考）
-    # 取前 35 名確保涵蓋主要候選（5個）+ 備選（3個），前幾名可能已持有
-    add_candidates = [m["symbol"] for m in momentum_ranks[:35] if m["symbol"] not in positions]
+    # 取前 45 名確保涵蓋主要候選（5個）+ 備選（3個），前幾名可能已持有
+    add_candidates = [m["symbol"] for m in momentum_ranks[:45] if m["symbol"] not in positions]
     alpha_symbols = list(set(add_candidates + held_symbols))
     print(f"正在計算 {len(alpha_symbols)} 檔標的的 1 年超額報酬...")
     alpha_1y_map = calculate_alpha_batch(alpha_symbols)
@@ -250,6 +250,15 @@ def run_premarket(scan_tw=False):
             price = a.get("current_price", 0)
             if price > 0:
                 a["suggested_shares_post_rotate"] = math.floor(post_rotate_per_slot / price)
+
+    # 5.8 補充板塊資訊到所有 actions（共用 Wikipedia 快取，無額外 HTTP 請求）
+    sector_map = get_sp500_sector_map()
+    for action in actions:
+        if action["action"] in ("HOLD", "EXIT", "ADD"):
+            action["sector"] = sector_map.get(action["symbol"])
+        elif action["action"] == "ROTATE":
+            action["buy_sector"] = sector_map.get(action["buy_symbol"])
+            action["sell_sector"] = sector_map.get(action["sell_symbol"])
 
     # 6. 計算投組總值
     total_value = portfolio.get("cash", 0)
@@ -379,7 +388,8 @@ def run_premarket(scan_tw=False):
                 elif from_high <= -10:
                     trail_str = f"  🟡追蹤{from_high:.0f}%"
             tag = "[core]" if a["source"] == "core_hold" else "      "
-            print(f"  {tag} {a['symbol']:<6} {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}{trail_str}")
+            sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
+            print(f"  {tag} {a['symbol']}{sector_tag}  {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}{trail_str}")
         print()
 
     if adds or safe_topups or backup_adds:
@@ -400,7 +410,8 @@ def run_premarket(scan_tw=False):
             post_rotate_shares = a.get('suggested_shares_post_rotate')
             if post_rotate_shares is not None and post_rotate_shares != a['suggested_shares']:
                 shares_str += f" (ROTATE後 {post_rotate_shares} 股)"
-            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']:<6} 建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
+            sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
+            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
             print(f"         原因: {a['reason']}")
         if backup_adds:
             print("  --- 備選（可替換 1Y/3Y alpha 差的主要候選）---")
@@ -416,7 +427,8 @@ def run_premarket(scan_tw=False):
                 if alpha_3y is not None:
                     alpha_3y_emoji = "🟢" if alpha_3y > 0 else ("🟡" if alpha_3y > -20 else "🔴")
                     alpha_str += f"  3Y: {alpha_3y:+.0f}% {alpha_3y_emoji}"
-                print(f"  [備#{a.get('momentum_rank', '?')}] {a['symbol']:<6} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
+                sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
+                print(f"  [備#{a.get('momentum_rank', '?')}] {a['symbol']}{sector_tag}  @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
                 print(f"           原因: {a['reason']}")
         for s in safe_topups:
             weight_after = (s["current_price"] * (s["shares"] + s["topup_shares"])) / total_value_for_topup * 100
@@ -442,8 +454,10 @@ def run_premarket(scan_tw=False):
             if buy_alpha_3y is not None:
                 alpha_3y_emoji = "🟢" if buy_alpha_3y > 0 else ("🟡" if buy_alpha_3y > -20 else "🔴")
                 alpha_str += f"  3Y: {buy_alpha_3y:+.0f}% {alpha_3y_emoji}"
-            print(f"  賣 {a['sell_symbol']:<6} {a['sell_shares']} 股 (動能: {a['sell_momentum']:+.1f}%, P&L: {sell_pnl})")
-            print(f"  → 買 {a['buy_symbol']:<6} {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
+            sell_sector_tag = f"[{a['sell_sector']}]" if a.get('sell_sector') else ""
+            buy_sector_tag = f"[{a['buy_sector']}]" if a.get('buy_sector') else ""
+            print(f"  賣 {a['sell_symbol']}{sell_sector_tag}  {a['sell_shares']} 股 (動能: {a['sell_momentum']:+.1f}%, P&L: {sell_pnl})")
+            print(f"  → 買 {a['buy_symbol']}{buy_sector_tag}  {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
             print(f"       動能差: +{a['momentum_diff']:.0f}%  {a['reason']}")
             print()
 

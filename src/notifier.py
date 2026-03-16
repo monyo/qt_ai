@@ -155,7 +155,8 @@ class GmailNotifier:
                 post_rotate = a.get("suggested_shares_post_rotate")
                 if post_rotate is not None and post_rotate != shares:
                     shares_str += f" (ROTATE後 {post_rotate} 股)"
-                lines.append(f"  #{rank} {a['symbol']:<6} 建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum}{rsi_str}{alpha_str}")
+                sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
+                lines.append(f"  #{rank} {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum}{rsi_str}{alpha_str}")
             for s in safe_topups:
                 momentum = f"+{s.get('momentum', 0):.1f}%(#{s.get('momentum_rank', '?')})"
                 alpha_str = f"  1Y: {s['alpha_1y']:+.0f}%" if s.get("alpha_1y") is not None else ""
@@ -173,7 +174,8 @@ class GmailNotifier:
                     if alpha_3y is not None:
                         alpha_3y_emoji = "🟢" if alpha_3y > 0 else ("🟡" if alpha_3y > -20 else "🔴")
                         alpha_str += f"  3Y: {alpha_3y:+.0f}% {alpha_3y_emoji}"
-                    lines.append(f"  [備#{a.get('momentum_rank', '?')}] {a['symbol']:<6} @ ${a.get('current_price', 0):.2f}  {momentum}{alpha_str}")
+                    sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
+                    lines.append(f"  [備#{a.get('momentum_rank', '?')}] {a['symbol']}{sector_tag}  @ ${a.get('current_price', 0):.2f}  {momentum}{alpha_str}")
             lines.append("")
 
         # ROTATE 建議（汰弱留強）
@@ -191,8 +193,10 @@ class GmailNotifier:
                 if buy_alpha_3y is not None:
                     alpha_3y_emoji = "🟢" if buy_alpha_3y > 0 else ("🟡" if buy_alpha_3y > -20 else "🔴")
                     alpha_str += f"  3Y: {buy_alpha_3y:+.0f}% {alpha_3y_emoji}"
-                lines.append(f"  賣 {a['sell_symbol']:<6} {a['sell_shares']} 股 (動能: {a['sell_momentum']:+.1f}%, P&L: {sell_pnl})")
-                lines.append(f"  → 買 {a['buy_symbol']:<6} {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
+                sell_sector_tag = f"[{a['sell_sector']}]" if a.get('sell_sector') else ""
+                buy_sector_tag = f"[{a['buy_sector']}]" if a.get('buy_sector') else ""
+                lines.append(f"  賣 {a['sell_symbol']}{sell_sector_tag}  {a['sell_shares']} 股 (動能: {a['sell_momentum']:+.1f}%, P&L: {sell_pnl})")
+                lines.append(f"  → 買 {a['buy_symbol']}{buy_sector_tag}  {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
                 lines.append(f"     {a.get('reason', '')}")
                 lines.append("")
 
@@ -380,8 +384,10 @@ class GmailNotifier:
             else:
                 row_bg = ""
 
+            sector_str = a.get("sector") or "—"
             portfolio_rows += f'''<tr style="{row_bg}border-bottom:1px solid #eee;">
                 <td style="padding:6px 8px;font-weight:bold;">{sym}</td>
+                <td style="padding:6px 8px;font-size:11px;color:#6c757d;">{sector_str}</td>
                 <td style="padding:6px 8px;text-align:center;">{a.get("shares", 0)}</td>
                 <td style="padding:6px 8px;text-align:right;">${price:.2f}</td>
                 <td style="padding:6px 8px;text-align:right;">${avg_price:.2f}</td>
@@ -398,6 +404,7 @@ class GmailNotifier:
         <table style="border-collapse:collapse;width:100%;font-size:13px;">
             <tr style="background:#343a40;color:#fff;">
                 <th style="padding:7px 8px;text-align:left;">標的</th>
+                <th style="padding:7px 8px;text-align:left;">板塊</th>
                 <th style="padding:7px 8px;">股數</th>
                 <th style="padding:7px 8px;">現價</th>
                 <th style="padding:7px 8px;">成本</th>
@@ -478,7 +485,8 @@ class GmailNotifier:
                 post_rotate = a.get("suggested_shares_post_rotate")
                 if post_rotate is not None and post_rotate != shares:
                     shares_str += f'<br><span style="color:#fd7e14;font-size:11px;">ROTATE後 {post_rotate} 股</span>'
-                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
+                sector_td = f'<td style="font-size:11px;color:#6c757d;">{a.get("sector") or "—"}</td>'
+                rows += f'<tr><td>#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
 
             for s in safe_topups:
                 momentum = f"+{s.get('momentum', 0):.1f}%(#{s.get('momentum_rank', '?')})"
@@ -486,7 +494,7 @@ class GmailNotifier:
                 if s.get("alpha_1y") is not None:
                     alpha_emoji = "🟢" if s["alpha_1y"] > 0 else ("🟡" if s["alpha_1y"] > -20 else "🔴")
                     alpha_html = f"<td>{alpha_emoji} {s['alpha_1y']:+.0f}%</td><td></td>"
-                rows += f'<tr style="background:#f0fff0;"><td style="color:#28a745;">增持</td><td><strong>{s["symbol"]}</strong></td><td>+{s["topup_shares"]} 股<br><span style="font-size:11px;color:#28a745;">{s["current_weight_pct"]:.1f}%→等權重 🟢</span></td><td>${s["current_price"]:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
+                rows += f'<tr style="background:#f0fff0;"><td style="color:#28a745;">增持</td><td><strong>{s["symbol"]}</strong></td><td></td><td>+{s["topup_shares"]} 股<br><span style="font-size:11px;color:#28a745;">{s["current_weight_pct"]:.1f}%→等權重 🟢</span></td><td>${s["current_price"]:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
 
             for a in backup_adds:
                 momentum = f"+{a.get('momentum', 0):.1f}%"
@@ -498,12 +506,13 @@ class GmailNotifier:
                     alpha_emoji = "🟢" if alpha_1y > 0 else ("🟡" if alpha_1y > -20 else "🔴")
                     alpha_3y_str = f"<td>{'🟢' if alpha_3y and alpha_3y > 0 else ('🟡' if alpha_3y and alpha_3y > -20 else '🔴')} {alpha_3y:+.0f}%</td>" if alpha_3y is not None else "<td></td>"
                     alpha_html = f"<td>{alpha_emoji} {alpha_1y:+.0f}%</td>{alpha_3y_str}"
-                rows += f'<tr style="background:#fff9e6;"><td style="color:#856404;">備#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td><td style="color:#6c757d;font-size:11px;">備選參考</td><td>${price:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
+                sector_td = f'<td style="font-size:11px;color:#6c757d;">{a.get("sector") or "—"}</td>'
+                rows += f'<tr style="background:#fff9e6;"><td style="color:#856404;">備#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td>{sector_td}<td style="color:#6c757d;font-size:11px;">備選參考</td><td>${price:.2f}</td><td>{momentum}</td><td></td>{alpha_html}</tr>'
 
             adds_html = f'''
             <h3 style="color:#28a745;">ADD / TOPUP 建議 ({len(adds)} 新倉 + {len(safe_topups)} 增持 + {len(backup_adds)} 備選)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;">類型</th><th>標的</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">類型</th><th>標的</th><th>板塊</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th></tr>
                 {rows}
             </table>'''
 
@@ -528,12 +537,16 @@ class GmailNotifier:
                     alpha_3y_emoji = "🟢" if buy_alpha_3y > 0 else ("🟡" if buy_alpha_3y > -20 else "🔴")
                     alpha_3y_str = f"{alpha_3y_emoji} {buy_alpha_3y:+.0f}%"
 
+                sell_sector = a.get("sell_sector") or "—"
+                buy_sector = a.get("buy_sector") or "—"
                 rows += f'''<tr style="border-bottom:1px solid #ddd;">
                     <td style="padding:8px;color:#dc3545;">賣 {a["sell_symbol"]}</td>
+                    <td style="font-size:11px;color:#6c757d;">{sell_sector}</td>
                     <td>{a["sell_shares"]} 股</td>
                     <td>{a["sell_momentum"]:+.1f}%</td>
                     <td style="color:{sell_pnl_color}">{sell_pnl_str}</td>
                     <td style="color:#28a745;">→ 買 {a["buy_symbol"]}</td>
+                    <td style="font-size:11px;color:#6c757d;">{buy_sector}</td>
                     <td>{a["buy_shares"]} 股</td>
                     <td>+{a["buy_momentum"]:.1f}%</td>
                     <td>{alpha_str}</td>
@@ -542,7 +555,7 @@ class GmailNotifier:
             rotates_html = f'''
             <h3 style="color:#fd7e14;">ROTATE 建議（汰弱留強）({len(rotates)} 組)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;">賣出</th><th>股數</th><th>動能</th><th>P&L</th><th>買入</th><th>股數</th><th>動能</th><th>1Y</th><th>3Y</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;">賣出</th><th>板塊</th><th>股數</th><th>動能</th><th>P&L</th><th>買入</th><th>板塊</th><th>股數</th><th>動能</th><th>1Y</th><th>3Y</th></tr>
                 {rows}
             </table>'''
 
