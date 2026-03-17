@@ -21,6 +21,7 @@ from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_
 from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_alpha_3y_batch, calculate_trend_state_batch
 from src.notifier import GmailNotifier
 from src.wave_scanner import scan_waves
+from src.breadth_monitor import get_breadth_status
 
 
 def get_spy_regime():
@@ -216,6 +217,9 @@ def run_premarket(scan_tw=False):
     print("正在執行波浪偵測掃描（量縮量增突破）...")
     wave_alerts = scan_waves(verbose=True)
 
+    # 4.95 市場廣度（使用波浪掃描快取，不需額外下載）
+    breadth_status = get_breadth_status()
+
     # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態 + 市場體制）
     actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map, market_regime=regime["regime"])
 
@@ -273,6 +277,11 @@ def run_premarket(scan_tw=False):
         },
         "actions": actions,
         "wave_alerts": wave_alerts,
+        "breadth_status": {
+            "stock_breadth":      breadth_status["stock_breadth"],
+            "suggested_max_adds": breadth_status["suggested_max_adds"],
+            "level":              breadth_status["level"],
+        },
     }
 
     actions_path = f"data/actions_{today_str}.json"
@@ -321,6 +330,8 @@ def run_premarket(scan_tw=False):
     if sector_exposure["warning"]:
         print(f"\n  🚨 注意：你的持股 {sector_exposure['tech_ratio']*100:.0f}% 是科技相關，而科技板塊正在走弱！")
 
+    # 市場廣度
+    print(f"\n  {breadth_status['display_line']}")
     print()
 
     # 波浪偵測警報（量縮量增突破）
@@ -428,7 +439,15 @@ def run_premarket(scan_tw=False):
         print()
 
     if new_adds or pyramid_adds or backup_adds:
-        print("--- ADD 建議 ---")
+        max_adds = breadth_status["suggested_max_adds"]
+        breadth_note = ""
+        if breadth_status["warning"]:
+            actual_new = len(new_adds)
+            if actual_new > max_adds:
+                breadth_note = f"  {breadth_status['emoji']} 廣度{breadth_status['level']}，建議只執行前 {max_adds} 支"
+            else:
+                breadth_note = f"  {breadth_status['emoji']} 廣度{breadth_status['level']}"
+        print(f"--- ADD 建議{breadth_note} ---")
         for a in new_adds:
             momentum_str = f"動能: +{a.get('momentum', 0):.1f}%"
             alpha_1y = a.get('alpha_1y')
