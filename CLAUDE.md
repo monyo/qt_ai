@@ -83,8 +83,8 @@ Quantitative stock scanning + position management system. Combines technical ana
 
 | Module | Role |
 |---|---|
-| `portfolio.py` | 持倉狀態管理。讀寫 `data/portfolio.json`（含 avg_price, cost_basis, transactions, favorite），白名單 `data/watchlist.json` |
-| `risk.py` | 風控：Fixed -15% → 追蹤停損（高點 -25%）→ MA200 → 極端 -35%，持倉上限 30 檔 |
+| `portfolio.py` | 持倉狀態管理。讀寫 `data/portfolio.json`（含 avg_price, cost_basis, transactions, tranches, favorite），白名單 `data/watchlist.json` |
+| `risk.py` | 風控：Fixed -15% → 追蹤停損（高點 -25%）→ MA200 → 極端 -35%，持倉上限 30 檔；含 TRANCHE_PARAMS 差異停損設定 |
 | `premarket.py` | 決策引擎。產出 HOLD/EXIT/ADD/ROTATE actions，含 source 和 version 欄位 |
 | `data_loader.py` | yfinance 資料取得（含快取）、S&P 500 ticker 列表、批次最新報價 |
 | `strategy.py` | 技術訊號：buy when Price > MA60 AND RSI < 70, sell when Price < MA60 OR RSI > 85 |
@@ -95,6 +95,11 @@ Quantitative stock scanning + position management system. Combines technical ana
 | `visualizer.py` | 策略 vs 大盤累積報酬圖 |
 | `sector_monitor.py` | 板塊相對強弱監控。追蹤 XLK/IGV/SMH vs SPY，板塊跑輸 -5% 時警告 |
 | `stop_loss_backtester.py` | 停損策略回測。支援 fixed / trailing stop-loss 比較 |
+| `market_environment.py` | VIX + USO 油價 → 4 種市場體制（平靜牛市/健康風險偏好/恐慌下跌/滯脹恐慌） |
+| `ml_scorer.py` | XGBoost ML 評分器。對 ADD 候選計算「打敗 SPY 機率（ML%）」+ SHAP 解釋。首次自動訓練並快取至 `data/_ml_model.pkl` |
+| `breadth_monitor.py` | S&P500 廣度監控（% 股票 > MA50），回測驗證廣度加權 ADD 數量有效 |
+| `wave_scanner.py` | 波浪偵測：量縮量增突破掃描 |
+| `notifier.py` | Gmail SMTP 通知。發送 HTML 摘要（本文）+ 完整 PDF（附件）|
 
 ### Key design details
 
@@ -113,11 +118,15 @@ Quantitative stock scanning + position management system. Combines technical ana
   - 主動建議換股，不限於現金不足時
   - 排除 core 和 favorite 標的
   - confirm 時可輸入實際股數（支援部分賣出/買入），sell/buy 獨立設定
-- **ADD / TOPUP 合併顯示**：
-  - ADD 清單同時顯示「現金」與「ROTATE 後」兩種股數建議
-  - `suggested_shares_post_rotate`：ROTATE 賣出收回現金後，扣除安全 TOPUP 預算，再分配給 ADD 槽位
-  - 安全 TOPUP（停損高於成本）以 `[增持]` 標籤合入 ADD 清單，目標補到等權重（total_value/30）
-  - 非安全 TOPUP 獨立顯示於下方「風險較高」區塊
+- **金字塔加碼**（v0.10.0，回測 Calmar 0.386 vs 標準 0.291）：
+  - 持倉動能 > 0 且批次數 < 5 時，可建議加碼（ADD action 含 `is_pyramid=True`）
+  - `portfolio.json` 每個持倉有 `tranches` 陣列，記錄每批進場價/日期/停損類型
+  - 差異停損：第1批 -15%/-25%，第2批 -10%/-15%，第3批+ -7%/-10%（越晚越緊）
+  - 保護期（30/15/7 天）只阻擋 EXIT，不阻擋加碼 ADD
+  - 回調後加碼（後批價格 < 前批）用標準停損，入場價本身是保護
+- **ADD 清單**：
+  - 同時顯示「現金」與「ROTATE 後」兩種股數建議（`suggested_shares_post_rotate`）
+  - TOPUP 機制已移除，統一用金字塔邏輯管理加碼
 - **RSI 警告**：🔴 RSI > 80 極度超買、🟡 RSI > 75 超買（只警告不過濾，讓使用者決定）
   - **設計理由**：動能策略中 RSI 高 = 強者恆強，不應成為排除或推遲買入的理由。
     RSI 均值回歸適用於短線反轉交易，與本系統中期動能策略方向相反。
@@ -140,8 +149,11 @@ Quantitative stock scanning + position management system. Combines technical ana
 - **報價定義**：前一交易日收盤價（盤前 yfinance 最後一筆 Close）
 - Signal 是事件（1/-1/0），backtester 轉為 Position（0/1）狀態機
 - AI 情緒在 API 額度用完時降級為中性 (0.0)
-- **板塊監控**：盤前報告顯示科技/軟體/半導體 vs SPY 相對強弱，當板塊跑輸 >5% 時警告
+- **板塊監控**：盤前報告顯示科技/軟體/半導體/金融/能源/醫療 vs SPY 相對強弱，當板塊跑輸 >5% 時警告
 - **曝險警告**：當持股科技比例高 + 科技板塊走弱時，會特別提醒
+- **市場廣度**：S&P500 % 股票 > MA50，分 5 級（健康/偏弱/弱/危險/極危險），建議 ADD ≤ 對應支數
+- **市場環境**：VIX + WTI 油價（USO ETF）組合判斷 4 種體制，滯脹恐慌時能源族群 ML% 高
+- **ML% 評分**：XGBoost 預測「打敗 SPY 的機率」（>50% = 模型看好）。首次使用自動訓練（~3-5 分鐘），之後讀快取 <1 秒。不需每日重訓，建議每季更新一次（刪 `data/_ml_model.pkl` 強制重訓）
 
 ## Portfolio Baseline (2026)
 

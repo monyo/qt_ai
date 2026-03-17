@@ -2,17 +2,20 @@
 
 美股量化掃描系統，結合**混合動能策略**、趨勢狀態偵測、板塊監控，每日盤前產出持倉建議。
 
-## 策略核心（v0.9.0）
+## 策略核心（v0.11.0）
 
 | 項目 | 規則 |
 |------|------|
-| **動能排名** | 混合動能 = 50% 短期(21天) + 50% 長期(252天)，回測 CAGR +62% |
-| **進場** | 動能排名前 5 名，等權重建倉 |
-| **出場** | Fixed -15% 停損 → 追蹤停損（高點 -25%）→ MA200 停損 → 極端 -35% 停損 |
-| **追蹤停損** | 從進場後最高點回落 -25% 即出場，回測 Calmar 0.882 vs 無追蹤 0.734 |
+| **動能排名** | 混合動能 = 50% 短期(21天) + 50% 長期(252天) |
+| **進場** | 動能排名前 5 名，等權重建倉；廣度偏低時自動收縮至前 1-4 名 |
+| **出場** | Fixed -15% → 追蹤停損（高點 -25%）→ MA200 → 極端 -35% |
+| **金字塔加碼** | 持倉動能 > 0 且批次 < 5 時可加碼；差異停損越晚越緊（回測 Calmar 0.386） |
 | **汰弱留強** | 持倉動能 vs 候選動能差距 >10% 且持有 >30 天，建議 ROTATE |
 | **趨勢狀態** | ↗️轉強（V轉）/ ↘️轉弱（倒V）/ →盤整，回測月差 +2.14% |
-| **候選池** | S&P 500 全部成分股 + 白名單 + 現有持倉 |
+| **市場廣度** | S&P500 % 股票 > MA50，5 級分類；廣度危險時建議只執行最強 1-2 支 |
+| **市場環境** | VIX + WTI 油價 → 4 種體制標籤（滯脹恐慌/恐慌下跌/健康風險偏好/平靜牛市） |
+| **ML% 評分** | XGBoost 預測每個 ADD 候選「打敗 SPY 的機率」（AUROC 0.726），>50% 模型看好 |
+| **候選池** | S&P 500 全部成分股（505 支）+ 白名單 + 現有持倉 |
 
 ---
 
@@ -75,19 +78,20 @@ python confirm_main.py 2026-02-19
 
 | 功能 | 說明 |
 |------|------|
-| **盤前建議** | 載入持倉 → 混合動能排名 → 三層出場 → 趨勢狀態 → 輸出 actions |
+| **盤前建議** | 載入持倉 → 混合動能排名 → 四層出場 → 趨勢狀態 → ML% → 輸出 actions |
 | **混合動能** | 50% 短期(21天) + 50% 長期(252天)，兼顧反應速度和穩定性 |
 | **四層出場** | Fixed -15% → 追蹤停損（高點 -25%）→ MA200 → 極端 -35%（優先順序依序檢查） |
+| **金字塔加碼** | 持倉動能持續正 → 最多 5 批加碼，差異停損（越晚越緊），回測 Calmar 0.386 |
 | **追蹤停損顯示** | HOLD 欄顯示距高回落 %：🔴 > -20%（接近觸發）、🟡 > -10% |
 | **趨勢狀態** | 偵測 V 轉回升、倒 V 見頂，補充動能指標的盲點 |
 | **汰弱留強** | 自動建議 ROTATE：賣出弱勢持倉，換入強勢候選；confirm 支援部分執行 |
-| **ADD/TOPUP 合併** | 安全增持標的（停損高於成本）合入 ADD 清單，同時顯示 ROTATE 後可買股數 |
-| **板塊監控** | 追蹤科技/軟體/半導體/金融/能源/醫療 vs SPY，板塊走弱時警告 |
-| **曝險警告** | 當科技股佔比高 + 板塊走弱時特別提醒 |
+| **市場廣度** | S&P500 廣度（% > MA50）5 級分類；廣度危險時自動縮減 ADD 建議數量 |
+| **市場環境** | VIX + WTI 油價組合 → 4 種體制標籤，滯脹恐慌時能源族群 ML% 系統性偏高 |
+| **ML% 評分** | XGBoost 對每個 ADD 候選計算「打敗 SPY 機率」，附 SHAP 前 3 驅動因素說明 |
+| **板塊監控** | 追蹤科技/軟體/半導體/金融/能源/醫療 vs SPY 相對強弱，板塊走弱時警告 |
 | **3Y Alpha** | ADD/ROTATE 候選同時顯示 1Y 和 3Y 超額報酬，協助判斷結構性衰退 vs 景氣循環低點 |
 | **RSI 警告** | 🔴 RSI > 80 極度超買、🟡 RSI > 75 超買（只警告不過濾） |
-| **郵件通知** | 每日盤前自動發送 HTML 格式的分析報告 |
-| **持倉追蹤** | 記錄 avg_price、cost_basis、high_since_entry |
+| **郵件通知** | 每日盤前自動發送 HTML 摘要（本文）+ 完整 PDF（附件） |
 | **年度 P&L** | 建立年度快照，追蹤年度績效 |
 
 ---
@@ -180,12 +184,15 @@ python -c "from src.sector_monitor import print_sector_report; print_sector_repo
 
 | 檔案 | 說明 |
 |------|------|
-| `portfolio.json` | 你的持倉狀態（股數、成本、交易紀錄） |
+| `portfolio.json` | 你的持倉狀態（股數、成本、tranches 批次紀錄、交易紀錄） |
 | `watchlist.json` | 白名單標的 |
 | `actions_YYYYMMDD.json` | 每日盤前建議（含 status: pending/confirmed/skipped） |
 | `snapshot_YYYY.json` | 年度快照（用於計算年度 P&L） |
-| `sector_map.json` | 板塊分類快取（GICS，供 portfolio_backtest.py 使用） |
-| `backtest_portfolio_YYYYMMDD.csv` | 投組層級回測結果 |
+| `_protection_bt_prices.pkl` | S&P500 歷史價格快取（ML 訓練資料，換裝置需手動搬移） |
+| `_ml_model.pkl` | 訓練好的 XGBoost 模型（自動生成，不存在時重訓） |
+| `_ml_features.pkl` | ML 特徵矩陣快取（自動生成） |
+| `_ml_sector_etf_prices.pkl` / `_ml_vix.pkl` / `_ml_oil.pkl` | ML 輔助快取（自動下載） |
+| `sector_map.json` | 板塊分類快取（GICS） |
 | `*.csv` | 股票歷史數據快取 |
 
 ### portfolio.json 結構
@@ -198,15 +205,22 @@ python -c "from src.sector_monitor import print_sector_report; print_sector_repo
       "avg_price": 500.0,
       "cost_basis": 10000,
       "first_entry": "2025-01-01",
-      "core": true
+      "core": true,
+      "tranches": [
+        {"n": 1, "shares": 20, "entry_price": 500.0, "entry_date": "2025-01-01", "stop_type": "standard"}
+      ]
     },
     "NVDA": {
-      "shares": 10,
-      "avg_price": 130.0,
-      "cost_basis": 1300,
+      "shares": 15,
+      "avg_price": 135.0,
+      "cost_basis": 2025,
       "first_entry": "2025-06-01",
       "core": false,
-      "favorite": true
+      "favorite": true,
+      "tranches": [
+        {"n": 1, "shares": 10, "entry_price": 130.0, "entry_date": "2025-06-01", "stop_type": "standard"},
+        {"n": 2, "shares": 5,  "entry_price": 145.0, "entry_date": "2025-07-01", "stop_type": "tight_2"}
+      ]
     }
   },
   "transactions": [
