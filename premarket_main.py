@@ -137,6 +137,87 @@ def run_init():
     print(f"已儲存至 data/portfolio.json")
 
 
+def _check_triple_warning(breadth_status, market_env, actions):
+    """
+    三重警告：廣度偏弱 + 市場環境差 + ADD 候選 ML% 全面低迷。
+    同時找出持倉中「動能轉負但尚未觸停損」的防禦性減倉候選。
+
+    Returns dict:
+        triggered           bool
+        conditions          list[str]
+        defensive_candidates list[dict]  持倉弱勢標的
+    """
+    conditions = []
+
+    # 條件 1：廣度偏弱（< 40%）
+    breadth = breadth_status.get("stock_breadth")
+    if breadth is not None and breadth < 0.40:
+        pct = breadth * 100
+        conditions.append(f"市場廣度 {pct:.0f}% < 40%（{breadth_status.get('level', '弱')}）")
+
+    # 條件 2：市場環境 🔴
+    regime_emoji = market_env.get("regime_emoji", "")
+    regime_label = market_env.get("regime_label", "")
+    if regime_emoji == "🔴":
+        conditions.append(f"市場環境 {regime_label}（VIX + 油價雙升）")
+
+    # 條件 3：ADD 候選 ML% 平均 < 50%
+    add_probs = [
+        a["ml_prob"] for a in actions
+        if a["action"] == "ADD" and not a.get("is_backup") and a.get("ml_prob") is not None
+    ]
+    if add_probs:
+        avg_ml = sum(add_probs) / len(add_probs) * 100
+        if avg_ml < 50:
+            conditions.append(f"ADD 候選 ML% 平均 {avg_ml:.0f}%（< 50%，模型整體不看好）")
+
+    triggered = len(conditions) >= 2  # 至少兩項才觸發，避免過敏
+
+    # 防禦性減倉候選：已持有、動能 < 0 或趨勢轉弱、尚未在 EXIT 清單
+    exit_syms = {a["symbol"] for a in actions if a["action"] == "EXIT"}
+    defensive = []
+    for a in actions:
+        if a["action"] != "HOLD":
+            continue
+        if a.get("source") == "core_hold":
+            continue
+        if a["symbol"] in exit_syms:
+            continue
+
+        mom   = a.get("momentum")
+        pnl   = a.get("pnl_pct")
+        ts    = (a.get("trend_state") or {}).get("state", "")
+
+        # 計算距高點 %
+        high_price = a.get("high_since_entry")
+        price      = a.get("current_price") or 0
+        from_high  = (price - high_price) / high_price * 100 if (high_price and price and high_price > 0) else None
+
+        is_weak = (
+            (mom is not None and mom < 0) or
+            (ts == "轉弱" and (mom or 0) < 5) or
+            (from_high is not None and from_high <= -15 and (pnl or 0) < 0)
+        )
+
+        if is_weak:
+            defensive.append({
+                "symbol":       a["symbol"],
+                "momentum":     mom,
+                "pnl_pct":      pnl,
+                "trend_state":  a.get("trend_state"),
+                "from_high_pct": from_high,
+            })
+
+    # 依動能升序（最弱的排前面）
+    defensive.sort(key=lambda x: (x.get("momentum") or 0))
+
+    return {
+        "triggered":            triggered,
+        "conditions":           conditions,
+        "defensive_candidates": defensive,
+    }
+
+
 def run_premarket(scan_tw=False):
     """產出盤前建議（動能策略 + 三層出場）
 
@@ -278,6 +359,9 @@ def run_premarket(scan_tw=False):
             a["ml_prob"]     = ml_scores[a["symbol"]]["prob"]
             a["ml_shap_top"] = ml_scores[a["symbol"]]["shap_top"]
 
+    # 7.6 三重警告檢查
+    _triple = _check_triple_warning(breadth_status, market_env, actions)
+
     # 7.5 儲存 actions
     actions_output = {
         "date": str(date.today()),
@@ -311,6 +395,7 @@ def run_premarket(scan_tw=False):
             "regime_emoji": market_env.get("regime_emoji"),
             "regime_note":  market_env.get("regime_note"),
         },
+        "triple_warning": _triple,
     }
 
     actions_path = f"data/actions_{today_str}.json"
@@ -366,6 +451,29 @@ def run_premarket(scan_tw=False):
     print()
     print(market_env["display_block"])
     print()
+
+    # 三重警告
+    if _triple["triggered"]:
+        print("=" * 60)
+        print("  🚨 三重警告：市場環境不利於新增部位")
+        print("=" * 60)
+        for c in _triple["conditions"]:
+            print(f"  ⚠️  {c}")
+        print()
+        print("  建議：優先守住現有部位，暫緩新 ADD。")
+        print("  以下持倉動能轉負、尚未觸停損，可考慮防禦性減倉：")
+        if _triple["defensive_candidates"]:
+            for d in _triple["defensive_candidates"]:
+                mom_str  = f"動能 {d['momentum']:+.1f}%" if d.get("momentum") is not None else ""
+                pnl_str  = f"P&L {d['pnl_pct']:+.1f}%" if d.get("pnl_pct") is not None else ""
+                ts_str   = f"↘️轉弱" if (d.get("trend_state") or {}).get("state") == "轉弱" else ""
+                trail_str = f"距高 {d['from_high_pct']:+.0f}%" if d.get("from_high_pct") is not None else ""
+                tags = "  ".join(x for x in [mom_str, pnl_str, ts_str, trail_str] if x)
+                print(f"    {d['symbol']:<7}  {tags}")
+        else:
+            print("    （目前持倉無明顯弱勢標的）")
+        print("=" * 60)
+        print()
 
     # 波浪偵測警報（量縮量增突破）
     if wave_alerts:

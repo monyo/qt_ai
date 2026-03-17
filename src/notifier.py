@@ -156,6 +156,22 @@ class GmailNotifier:
             detail = "  " + "  ".join(parts) if parts else ""
             menv_html = f'<p style="margin:6px 0;font-size:12px;">{emoji} 市場環境: <span style="color:{regime_color};font-weight:bold;">{menv["regime_label"]}</span>{detail}</p>'
 
+        # 三重警告
+        triple = data.get("triple_warning", {})
+        triple_html = ""
+        if triple.get("triggered"):
+            cond_items = "".join(f"<li>⚠️ {c}</li>" for c in triple.get("conditions", []))
+            def_rows = ""
+            for d in triple.get("defensive_candidates", []):
+                mom_str  = f"{d['momentum']:+.1f}%" if d.get("momentum") is not None else "—"
+                pnl_str  = f"{d['pnl_pct']:+.1f}%" if d.get("pnl_pct") is not None else "—"
+                ts_state = (d.get("trend_state") or {}).get("state", "")
+                ts_str   = "↘️轉弱" if ts_state == "轉弱" else ("→" if ts_state == "盤整" else "")
+                fh_str   = f"{d['from_high_pct']:+.0f}%" if d.get("from_high_pct") is not None else "—"
+                def_rows += f'<tr><td style="padding:4px 8px;font-weight:bold;">{d["symbol"]}</td><td style="padding:4px 8px;color:#dc3545;">{mom_str}</td><td style="padding:4px 8px;">{pnl_str}</td><td style="padding:4px 8px;">{ts_str}</td><td style="padding:4px 8px;">{fh_str}</td></tr>'
+            def_table = f'<p style="margin:6px 0;font-size:12px;"><strong>防禦性減倉候選（動能轉負，尚未觸停損）：</strong></p><table style="border-collapse:collapse;font-size:12px;"><tr style="background:#f0f0f0;"><th style="padding:4px 8px;">標的</th><th>動能</th><th>P&L</th><th>趨勢</th><th>距高</th></tr>{def_rows}</table>' if def_rows else '<p style="font-size:12px;color:#6c757d;">（目前持倉無明顯弱勢標的）</p>'
+            triple_html = f'<div style="background:#f8d7da;padding:12px 16px;border-radius:6px;margin:10px 0;border-left:4px solid #dc3545;"><strong>🚨 三重警告：市場環境不利於新增部位</strong><ul style="margin:6px 0 8px;">{cond_items}</ul><p style="margin:4px 0;font-size:12px;">建議：優先守住現有部位，暫緩新 ADD。</p>{def_table}</div>'
+
         # Actions 分類
         exits = [a for a in actions if a["action"] == "EXIT"]
         new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
@@ -212,6 +228,7 @@ class GmailNotifier:
 
   {sector_html}
   {menv_html}
+  {triple_html}
   {exit_html}
   {rotate_html}
   {add_html}
@@ -491,6 +508,24 @@ class GmailNotifier:
                 note_str = f'<br><span style="font-size:11px;color:#555;">{menv["regime_note"].replace(chr(10), "<br>")}</span>'
             detail_str = "  &nbsp;  ".join(lines_env)
             menv_html_full = f'<div style="background:{bg_color};padding:10px;border-radius:5px;margin:10px 0;border-left:4px solid {border_color};"><strong>{emoji} 市場環境: {menv["regime_label"]}</strong> &nbsp; {detail_str}{note_str}</div>'
+
+        # 三重警告（完整 HTML 版）
+        triple = data.get("triple_warning", {})
+        triple_html_full = ""
+        if triple.get("triggered"):
+            cond_items = "".join(f"<li>⚠️ {c}</li>" for c in triple.get("conditions", []))
+            def_rows = ""
+            for d in triple.get("defensive_candidates", []):
+                mom_str  = f"{d['momentum']:+.1f}%" if d.get("momentum") is not None else "—"
+                pnl_str  = f"{d['pnl_pct']:+.1f}%" if d.get("pnl_pct") is not None else "—"
+                ts_state = (d.get("trend_state") or {}).get("state", "")
+                ts_str   = "↘️轉弱" if ts_state == "轉弱" else ("→" if ts_state == "盤整" else "")
+                fh_str   = f"{d['from_high_pct']:+.0f}%" if d.get("from_high_pct") is not None else "—"
+                def_rows += f'<tr><td style="padding:5px 8px;font-weight:bold;">{d["symbol"]}</td><td style="padding:5px 8px;color:#dc3545;">{mom_str}</td><td style="padding:5px 8px;">{pnl_str}</td><td style="padding:5px 8px;">{ts_str}</td><td style="padding:5px 8px;">{fh_str}</td></tr>'
+            def_table = ""
+            if def_rows:
+                def_table = f'<p style="margin:8px 0 4px;"><strong>防禦性減倉候選（動能轉負，尚未觸停損）：</strong></p><table style="border-collapse:collapse;width:auto;font-size:12px;"><tr style="background:#f0f0f0;"><th style="padding:5px 8px;">標的</th><th>動能</th><th>P&L</th><th>趨勢</th><th>距高</th></tr>{def_rows}</table>'
+            triple_html_full = f'<div style="background:#f8d7da;padding:12px;border-radius:5px;margin:10px 0;border-left:4px solid #dc3545;"><strong>🚨 三重警告：市場環境不利於新增部位</strong><ul style="margin:6px 0;">{cond_items}</ul><p style="margin:4px 0;font-size:12px;">建議：優先守住現有部位，暫緩新 ADD。</p>{def_table}</div>'
 
         # 板塊警告
         alerts_html = ""
@@ -919,6 +954,7 @@ class GmailNotifier:
 
             {regime_html}
             {menv_html_full}
+            {triple_html_full}
             {alerts_html}
             {watch_html}
             {portfolio_html}
