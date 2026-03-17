@@ -142,6 +142,20 @@ class GmailNotifier:
             if parts:
                 sector_html = f'<p style="margin:6px 0;font-size:12px;">板塊 vs SPY (5d): {" &nbsp;|&nbsp; ".join(parts)}</p>'
 
+        # 市場環境
+        menv = data.get("market_env", {})
+        menv_html = ""
+        if menv.get("regime_label"):
+            emoji = menv.get("regime_emoji", "")
+            regime_color = "#dc3545" if emoji == "🔴" else ("#fd7e14" if emoji == "🟠" else "#28a745")
+            parts = []
+            if menv.get("vix_level") is not None:
+                parts.append(f"VIX {menv['vix_level']:.1f}")
+            if menv.get("oil_ret_21d") is not None:
+                parts.append(f"WTI {menv['oil_ret_21d']:+.1f}%")
+            detail = "  " + "  ".join(parts) if parts else ""
+            menv_html = f'<p style="margin:6px 0;font-size:12px;">{emoji} 市場環境: <span style="color:{regime_color};font-weight:bold;">{menv["regime_label"]}</span>{detail}</p>'
+
         # Actions 分類
         exits = [a for a in actions if a["action"] == "EXIT"]
         new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
@@ -173,11 +187,15 @@ class GmailNotifier:
         if new_adds or pyramid_adds:
             rows = ""
             for a in new_adds:
-                rows += f'<tr><td style="padding:5px 8px;font-weight:bold;">{a["symbol"]}</td><td style="padding:5px 8px;font-size:11px;color:#555;">新倉 {a.get("suggested_shares", 0)} 股 @ ${a.get("current_price", 0):.2f}</td><td style="padding:5px 8px;font-size:11px;color:#666;">{a.get("reason", "")[:60]}</td></tr>'
+                ml_prob = a.get("ml_prob")
+                ml_td = f'<td style="padding:5px 8px;font-size:11px;color:#0066cc;font-weight:bold;">{ml_prob*100:.0f}%</td>' if ml_prob is not None else '<td style="padding:5px 8px;"></td>'
+                rows += f'<tr><td style="padding:5px 8px;font-weight:bold;">{a["symbol"]}</td><td style="padding:5px 8px;font-size:11px;color:#555;">新倉 {a.get("suggested_shares", 0)} 股 @ ${a.get("current_price", 0):.2f}</td>{ml_td}<td style="padding:5px 8px;font-size:11px;color:#666;">{a.get("reason", "")[:60]}</td></tr>'
             for a in pyramid_adds:
                 direction = "↑" if a.get("direction") == "up" else "↓"
-                rows += f'<tr style="background:#f0f7ff;"><td style="padding:5px 8px;font-weight:bold;">{a["symbol"]}</td><td style="padding:5px 8px;font-size:11px;color:#0066cc;">金字塔{direction} 第{a.get("tranche_n", 2)}批 {a.get("suggested_shares", 0)} 股</td><td style="padding:5px 8px;font-size:11px;color:#666;">{a.get("reason", "")[:60]}</td></tr>'
-            add_html = f'<h3 style="color:#28a745;margin:14px 0 5px;">➕ ADD ({len(new_adds)} 新倉 + {len(pyramid_adds)} 金字塔)</h3><table style="border-collapse:collapse;width:100%;font-size:12px;border-top:1px solid #eee;">{rows}</table>'
+                ml_prob = a.get("ml_prob")
+                ml_td = f'<td style="padding:5px 8px;font-size:11px;color:#0066cc;font-weight:bold;">{ml_prob*100:.0f}%</td>' if ml_prob is not None else '<td style="padding:5px 8px;"></td>'
+                rows += f'<tr style="background:#f0f7ff;"><td style="padding:5px 8px;font-weight:bold;">{a["symbol"]}</td><td style="padding:5px 8px;font-size:11px;color:#0066cc;">金字塔{direction} 第{a.get("tranche_n", 2)}批 {a.get("suggested_shares", 0)} 股</td>{ml_td}<td style="padding:5px 8px;font-size:11px;color:#666;">{a.get("reason", "")[:60]}</td></tr>'
+            add_html = f'<h3 style="color:#28a745;margin:14px 0 5px;">➕ ADD ({len(new_adds)} 新倉 + {len(pyramid_adds)} 金字塔)</h3><table style="border-collapse:collapse;width:100%;font-size:12px;border-top:1px solid #eee;"><tr style="background:#f0f0f0;"><th style="padding:5px 8px;text-align:left;">標的</th><th style="text-align:left;">股數/批次</th><th>ML%</th><th style="text-align:left;">原因</th></tr>{rows}</table>'
 
         hold_html = f'<p style="margin:10px 0;font-size:12px;color:#6c757d;">✅ HOLD: {len(holds)} 檔（詳見附件 PDF）</p>'
 
@@ -193,6 +211,7 @@ class GmailNotifier:
   </div>
 
   {sector_html}
+  {menv_html}
   {exit_html}
   {rotate_html}
   {add_html}
@@ -245,6 +264,19 @@ class GmailNotifier:
             lines.append("板塊警告:")
             for alert in sector["alerts"]:
                 lines.append(f"  - {alert}")
+            lines.append("")
+
+        # 市場環境（VIX + 石油）
+        menv = data.get("market_env", {})
+        if menv.get("regime_label"):
+            emoji = menv.get("regime_emoji", "")
+            parts = []
+            if menv.get("vix_level") is not None:
+                parts.append(f"VIX {menv['vix_level']:.1f}")
+            if menv.get("oil_ret_21d") is not None:
+                parts.append(f"WTI {menv['oil_ret_21d']:+.1f}%（21日）")
+            detail = "（" + "，".join(parts) + "）" if parts else ""
+            lines.append(f"市場環境: {emoji} {menv['regime_label']}{detail}")
             lines.append("")
 
         # 分類 actions
@@ -306,12 +338,24 @@ class GmailNotifier:
                 if post_rotate is not None and post_rotate != shares:
                     shares_str += f" (ROTATE後 {post_rotate} 股)"
                 sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
-                lines.append(f"  #{rank} {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum}{rsi_str}{alpha_str}")
+                ml_prob = a.get("ml_prob")
+                ml_str = f"  ML: {ml_prob*100:.0f}%" if ml_prob is not None else ""
+                lines.append(f"  #{rank} {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum}{rsi_str}{alpha_str}{ml_str}")
+                shap_top = a.get("ml_shap_top", [])
+                if shap_top:
+                    shap_parts = [f"{arrow}{label}" for label, sv, arrow in shap_top]
+                    lines.append(f"       ML因素: {' | '.join(shap_parts)}")
             for a in pyramid_adds:
                 momentum = f"+{a.get('momentum', 0):.1f}%"
                 direction_arrow = "↑" if a.get("direction") == "up" else "↓"
                 alpha_str = f"  1Y: {a['alpha_1y']:+.0f}%" if a.get("alpha_1y") is not None else ""
-                lines.append(f"  [{direction_arrow}第{a['tranche_n']}批] {a['symbol']}  +{a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}  {momentum}{alpha_str}")
+                ml_prob = a.get("ml_prob")
+                ml_str = f"  ML: {ml_prob*100:.0f}%" if ml_prob is not None else ""
+                lines.append(f"  [{direction_arrow}第{a['tranche_n']}批] {a['symbol']}  +{a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}  {momentum}{alpha_str}{ml_str}")
+                shap_top = a.get("ml_shap_top", [])
+                if shap_top:
+                    shap_parts = [f"{arrow}{label}" for label, sv, arrow in shap_top]
+                    lines.append(f"       ML因素: {' | '.join(shap_parts)}")
             if backup_adds:
                 lines.append("  [備選 — 可替換 1Y/3Y alpha 差的主要候選]")
                 for a in backup_adds:
@@ -422,6 +466,31 @@ class GmailNotifier:
             else:
                 pct = f"{regime['pct_vs_ma200']:.1f}%" if regime.get("pct_vs_ma200") is not None else ""
                 regime_html = f'<div style="background:#f8d7da;padding:10px;border-radius:5px;margin:10px 0;border-left:4px solid #dc3545;"><strong>🔴 市場體制: BEAR</strong> &nbsp; SPY ${regime.get("spy_price")} &lt; MA200 ${regime.get("ma200")} ({pct})<br><span style="color:#721c24;">⚠️ ADD / ROTATE 已暫停，等 SPY 站回 MA200 再開放新倉</span></div>'
+
+        # 市場環境（VIX + 石油）
+        menv = data.get("market_env", {})
+        menv_html_full = ""
+        if menv.get("regime_label"):
+            emoji = menv.get("regime_emoji", "")
+            regime_color = "#dc3545" if emoji == "🔴" else ("#fd7e14" if emoji == "🟠" else "#28a745")
+            bg_color = "#f8d7da" if emoji == "🔴" else ("#fff3cd" if emoji == "🟡" else "#d4edda")
+            border_color = regime_color
+            lines_env = []
+            if menv.get("vix_level") is not None:
+                vix_str = f"VIX {menv['vix_level']:.1f}"
+                if menv.get("vix_ma63") is not None:
+                    vix_str += f"（vs 63日均 {menv['vix_ma63']:.1f}）"
+                lines_env.append(vix_str)
+            if menv.get("oil_ret_21d") is not None:
+                oil_str = f"WTI {menv['oil_ret_21d']:+.1f}%（21日）"
+                if menv.get("oil_ma_ratio") is not None:
+                    oil_str += f"  均線比 {menv['oil_ma_ratio']:.2f}×"
+                lines_env.append(oil_str)
+            note_str = ""
+            if menv.get("regime_note"):
+                note_str = f'<br><span style="font-size:11px;color:#555;">{menv["regime_note"].replace(chr(10), "<br>")}</span>'
+            detail_str = "  &nbsp;  ".join(lines_env)
+            menv_html_full = f'<div style="background:{bg_color};padding:10px;border-radius:5px;margin:10px 0;border-left:4px solid {border_color};"><strong>{emoji} 市場環境: {menv["regime_label"]}</strong> &nbsp; {detail_str}{note_str}</div>'
 
         # 板塊警告
         alerts_html = ""
@@ -698,6 +767,14 @@ class GmailNotifier:
                 alpha_html = _add_alpha_html(a)
                 sector_td = f'<td style="font-size:11px;color:#6c757d;">{a.get("sector") or "—"}</td>'
 
+                ml_prob = a.get("ml_prob")
+                ml_td = f'<td style="text-align:center;color:#0066cc;font-weight:bold;">{ml_prob*100:.0f}%</td>' if ml_prob is not None else '<td style="text-align:center;color:#6c757d;">—</td>'
+                shap_top = a.get("ml_shap_top", [])
+                shap_str = ""
+                if shap_top:
+                    shap_parts = [f"{arrow}{label}" for label, sv, arrow in shap_top]
+                    shap_str = f'<br><span style="font-size:10px;color:#6c757d;">{" | ".join(shap_parts)}</span>'
+
                 if a.get("is_pyramid"):
                     direction_arrow = "↑" if a.get("direction") == "up" else "↓"
                     tranche_label = f'<span style="color:#0d6efd;">{direction_arrow}第{a["tranche_n"]}批</span>'
@@ -705,13 +782,13 @@ class GmailNotifier:
                     post_rotate = a.get("suggested_shares_post_rotate")
                     if post_rotate is not None and post_rotate != a.get("suggested_shares", 0):
                         shares_str += f'<br><span style="color:#fd7e14;font-size:11px;">ROTATE後 {post_rotate} 股</span>'
-                    rows += f'<tr style="background:#e8f4ff;"><td>#{rank}</td><td><strong>{a["symbol"]}</strong> {tranche_label}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
+                    rows += f'<tr style="background:#e8f4ff;"><td>#{rank}</td><td><strong>{a["symbol"]}</strong> {tranche_label}{shap_str}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}{ml_td}</tr>'
                 else:
                     shares_str = str(a.get("suggested_shares", 0))
                     post_rotate = a.get("suggested_shares_post_rotate")
                     if post_rotate is not None and post_rotate != a.get("suggested_shares", 0):
                         shares_str += f'<br><span style="color:#fd7e14;font-size:11px;">ROTATE後 {post_rotate} 股</span>'
-                    rows += f'<tr><td>#{rank}</td><td>{a["symbol"]}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
+                    rows += f'<tr><td>#{rank}</td><td>{a["symbol"]}{shap_str}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}{ml_td}</tr>'
 
             for a in backup_adds:
                 price = a.get("current_price", 0)
@@ -719,13 +796,13 @@ class GmailNotifier:
                 rsi_html = _add_rsi_html(a)
                 alpha_html = _add_alpha_html(a)
                 sector_td = f'<td style="font-size:11px;color:#6c757d;">{a.get("sector") or "—"}</td>'
-                rows += f'<tr style="background:#fff9e6;"><td style="color:#856404;">備#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td>{sector_td}<td style="color:#6c757d;font-size:11px;">備選參考</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}</tr>'
+                rows += f'<tr style="background:#fff9e6;"><td style="color:#856404;">備#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td>{sector_td}<td style="color:#6c757d;font-size:11px;">備選參考</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}<td></td></tr>'
 
             adds_html = f'''
             <div class="section-block">
             <h3 style="color:#28a745;">ADD 建議 ({len(new_adds)} 新倉 + {len(pyramid_adds)} 金字塔 + {len(backup_adds)} 備選)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;text-align:left;">排名</th><th style="text-align:left;">標的</th><th style="text-align:left;">板塊</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;text-align:left;">排名</th><th style="text-align:left;">標的</th><th style="text-align:left;">板塊</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th><th>ML%</th></tr>
                 {rows}
             </table>
             </div>'''
@@ -841,6 +918,7 @@ class GmailNotifier:
             </table>
 
             {regime_html}
+            {menv_html_full}
             {alerts_html}
             {watch_html}
             {portfolio_html}

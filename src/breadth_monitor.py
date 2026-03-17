@@ -106,6 +106,7 @@ def get_breadth_status() -> dict:
 
     return {
         "stock_breadth":      breadth,
+        "raw_breadth":        breadth,          # 0–1 float，供 MLScorer 使用
         "suggested_max_adds": suggested,
         "level":              level,
         "warning":            warning,

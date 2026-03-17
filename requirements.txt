@@ -18,3 +18,8 @@ matplotlib>=3.10.8
 
 # PDF 生成
 weasyprint>=68.0
+
+# ML 選股評分器
+xgboost>=2.0
+scikit-learn>=1.4
+shap>=0.44

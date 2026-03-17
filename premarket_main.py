@@ -17,6 +17,8 @@ from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
 from src.risk import check_position_limit, TRANCHE_PARAMS
 from src.premarket import generate_actions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
+from src.market_environment import get_market_environment
+from src.ml_scorer import MLScorer
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
 from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_alpha_3y_batch, calculate_trend_state_batch
 from src.notifier import GmailNotifier
@@ -165,11 +167,16 @@ def run_premarket(scan_tw=False):
         regime_label = "資料無法取得，預設 BULL"
     print(f"  市場體制: {regime['regime']}  {regime_label}")
 
-    # 1.6 板塊相對強弱檢查
-    print("正在檢查板塊相對強弱...")
+    # 1.6 板塊相對強弱 + 市場環境（VIX + 石油）
+    print("正在檢查板塊相對強弱 + 市場環境...")
     sector_summary = get_sector_summary(lookback_days=5)
     held_symbols = list(positions.keys())
     sector_exposure = check_holdings_sector_exposure(held_symbols)
+    market_env = get_market_environment()
+
+    # 1.7 ML 評分器（快取存在直接讀取，否則自動訓練）
+    ml_scorer = MLScorer()
+    ml_scorer.ensure_trained()
 
     # 2. 組合候選池：SP500 前 100 + 白名單 + 持倉
     sp500 = get_sp500_tickers()
@@ -258,6 +265,19 @@ def run_premarket(scan_tw=False):
     snapshot = load_snapshot(current_year)
     yearly_pnl = calculate_yearly_pnl(total_value, snapshot) if snapshot else None
 
+    # 5.9 ML 評分（ADD 候選 + 金字塔）
+    add_syms_for_ml = list({
+        a["symbol"] for a in actions
+        if a["action"] == "ADD"
+    })
+    # 取廣度值供 ML 特徵使用
+    raw_breadth = breadth_status.get("raw_breadth", 0.6)
+    ml_scores = ml_scorer.score(add_syms_for_ml, breadth=raw_breadth) if ml_scorer._ready else {}
+    for a in actions:
+        if a["action"] == "ADD" and a["symbol"] in ml_scores:
+            a["ml_prob"]     = ml_scores[a["symbol"]]["prob"]
+            a["ml_shap_top"] = ml_scores[a["symbol"]]["shap_top"]
+
     # 7.5 儲存 actions
     actions_output = {
         "date": str(date.today()),
@@ -281,6 +301,15 @@ def run_premarket(scan_tw=False):
             "stock_breadth":      breadth_status["stock_breadth"],
             "suggested_max_adds": breadth_status["suggested_max_adds"],
             "level":              breadth_status["level"],
+        },
+        "market_env": {
+            "vix_level":    market_env.get("vix_level"),
+            "vix_ma63":     market_env.get("vix_ma63"),
+            "oil_ret_21d":  market_env.get("oil_ret_21d"),
+            "oil_ma_ratio": market_env.get("oil_ma_ratio"),
+            "regime_label": market_env.get("regime_label"),
+            "regime_emoji": market_env.get("regime_emoji"),
+            "regime_note":  market_env.get("regime_note"),
         },
     }
 
@@ -332,6 +361,10 @@ def run_premarket(scan_tw=False):
 
     # 市場廣度
     print(f"\n  {breadth_status['display_line']}")
+
+    # 市場環境（VIX + 石油）
+    print()
+    print(market_env["display_block"])
     print()
 
     # 波浪偵測警報（量縮量增突破）
@@ -465,7 +498,15 @@ def run_premarket(scan_tw=False):
             if post_rotate_shares is not None and post_rotate_shares != a['suggested_shares']:
                 shares_str += f" (ROTATE後 {post_rotate_shares} 股)"
             sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
-            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
+            # ML 評分
+            ml_prob = a.get('ml_prob')
+            ml_str  = f"  ML: {ml_prob*100:.0f}%" if ml_prob is not None else ""
+            print(f"  [#{a.get('momentum_rank', '?')}] {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}{ml_str}")
+            # SHAP 解釋（若有）
+            shap_top = a.get('ml_shap_top', [])
+            if shap_top:
+                shap_parts = [f"{arrow}{label}" for label, sv, arrow in shap_top]
+                print(f"         ML因素: {' | '.join(shap_parts)}")
             print(f"         原因: {a['reason']}")
         if pyramid_adds:
             print("  --- 金字塔加碼（持倉加碼）---")
@@ -480,7 +521,13 @@ def run_premarket(scan_tw=False):
                 shares_str = str(a['suggested_shares'])
                 if post_rotate_shares is not None and post_rotate_shares != a['suggested_shares']:
                     shares_str += f" (ROTATE後 {post_rotate_shares} 股)"
-                print(f"  [{direction_arrow}第{a['tranche_n']}批] {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}")
+                ml_prob = a.get('ml_prob')
+                ml_str  = f"  ML: {ml_prob*100:.0f}%" if ml_prob is not None else ""
+                print(f"  [{direction_arrow}第{a['tranche_n']}批] {a['symbol']}{sector_tag}  建議 {shares_str} @ ${a.get('current_price', 0):.2f}  {momentum_str}{alpha_str}{ml_str}")
+                shap_top = a.get('ml_shap_top', [])
+                if shap_top:
+                    shap_parts = [f"{arrow}{label}" for label, sv, arrow in shap_top]
+                    print(f"         ML因素: {' | '.join(shap_parts)}")
                 print(f"         原因: {a['reason']}")
         if backup_adds:
             print("  --- 備選（可替換 1Y/3Y alpha 差的主要候選）---")
