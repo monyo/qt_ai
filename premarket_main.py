@@ -20,6 +20,7 @@ from src.sector_monitor import get_sector_summary, check_holdings_sector_exposur
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
 from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_alpha_3y_batch, calculate_trend_state_batch
 from src.notifier import GmailNotifier
+from src.wave_scanner import scan_waves
 
 
 def get_spy_regime():
@@ -211,6 +212,10 @@ def run_premarket(scan_tw=False):
     print(f"正在計算 {len(held_symbols)} 檔持倉的趨勢狀態...")
     trend_state_map = calculate_trend_state_batch(held_symbols)
 
+    # 4.9 波浪偵測掃描（量縮量增突破，需下載全市場量能，首次較慢）
+    print("正在執行波浪偵測掃描（量縮量增突破）...")
+    wave_alerts = scan_waves(verbose=True)
+
     # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態 + 市場體制）
     actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map, market_regime=regime["regime"])
 
@@ -267,6 +272,7 @@ def run_premarket(scan_tw=False):
             "tech_ratio": sector_exposure["tech_ratio"],
         },
         "actions": actions,
+        "wave_alerts": wave_alerts,
     }
 
     actions_path = f"data/actions_{today_str}.json"
@@ -316,6 +322,27 @@ def run_premarket(scan_tw=False):
         print(f"\n  🚨 注意：你的持股 {sector_exposure['tech_ratio']*100:.0f}% 是科技相關，而科技板塊正在走弱！")
 
     print()
+
+    # 波浪偵測警報（量縮量增突破）
+    if wave_alerts:
+        high_alerts  = [a for a in wave_alerts if a["alert_level"] == "HIGH"]
+        watch_alerts = [a for a in wave_alerts if a["alert_level"] == "WATCH"]
+        print("=" * 60)
+        print("  🚨 波浪偵測警報（量縮量增突破）")
+        print("     F+A 雙信號精準度 ~67%，歷史命中 META(2023)、ANET(2023)")
+        print("=" * 60)
+        for a in high_alerts:
+            voo_note = ""
+            if individual >= 28 and "VOO" in positions:
+                voo_note = "  ← ⚠️ 槽位接近上限，考慮賣出 VOO 換入"
+            print(f"  🔴 HIGH  {a['sym']:<6} 排名 #{a['rank_now']}  信號: {a['signals']}{voo_note}")
+            if a.get("mom_pct") is not None:
+                rank_str = f"{a.get('rank_prev','?')} → {a['rank_now']}" if a.get("rank_prev") else f"#{a['rank_now']}"
+                print(f"          動能: {a['mom_pct']:+.1f}%  排名變化: {rank_str}")
+        for a in watch_alerts:
+            print(f"  🟡 WATCH {a['sym']:<6} 排名 #{a['rank_now']}  信號: {a['signals']}")
+        print("=" * 60)
+        print()
 
     # 分類印出
     exits = [a for a in actions if a["action"] == "EXIT"]
