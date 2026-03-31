@@ -70,19 +70,28 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
             if shares <= 0:
                 continue
 
-            stop_type = action.get("stop_type", "standard")
-
             if symbol in portfolio["positions"]:
                 pos = portfolio["positions"][symbol]
                 # 先確保 tranches 存在（使用更新前的 avg_price 做 lazy migrate）
                 _ensure_tranches(pos)
+
+                # stop_type 依實際成交價 vs 前一批成本重算
+                # （盤前推薦的 stop_type 是依當時市價，確認時用實際價格校正）
+                prev_entry = pos["tranches"][-1]["entry_price"] if pos["tranches"] else 0
+                n_next = max((t["n"] for t in pos["tranches"]), default=0) + 1
+                if price > prev_entry:
+                    # 實際買入比前批更貴 = 上行金字塔 = 收緊停損
+                    stop_type = "tight_2" if n_next == 2 else "tight_3"
+                else:
+                    # 實際買入比前批便宜或相同 = 下行/持平 = 標準停損
+                    stop_type = "standard"
+
                 pos["avg_price"] = calc_avg_price(
                     pos["avg_price"], pos["shares"], price, shares
                 )
                 pos["shares"] += shares
                 pos["cost_basis"] = pos["avg_price"] * pos["shares"]
                 # 追加新批次
-                n_next = max((t["n"] for t in pos["tranches"]), default=0) + 1
                 pos["tranches"].append({
                     "n": n_next,
                     "shares": shares,

@@ -137,6 +137,58 @@ def run_init():
     print(f"已儲存至 data/portfolio.json")
 
 
+def _get_stop_update_reminders(portfolio, current_prices):
+    """找出追蹤停損價 > 固定停損價的持倉批次，提醒更新 Firstrade 停損單。
+
+    追蹤停損 = 批次最高點 × (1 - trailing_pct)
+    固定停損 = 批次成本價 × (1 - fixed_pct)
+
+    當追蹤停損 > 固定停損，代表股票已漲幅足夠，
+    追蹤停損比固定停損更嚴格（更高），應把掛單價格調高。
+
+    Returns:
+        list of dict: symbol, tranche_n, fixed_stop, trailing_stop, high_price, trailing_pct
+    """
+    from src.risk import TRANCHE_PARAMS
+    reminders = []
+    positions = portfolio.get("positions", {})
+
+    for symbol, pos in positions.items():
+        if pos.get("core"):
+            continue
+
+        tranches = pos.get("tranches", [])
+        if not tranches:
+            tranches = [{
+                "n": 1,
+                "entry_price": pos["avg_price"],
+                "high": pos.get("high_since_entry", pos["avg_price"]),
+                "stop_type": "standard",
+            }]
+
+        multi = len(tranches) > 1
+        for t in tranches:
+            params = TRANCHE_PARAMS.get(t.get("stop_type", "standard"), TRANCHE_PARAMS["standard"])
+            entry_price = t.get("entry_price", pos["avg_price"])
+            high_price  = t.get("high") or pos.get("high_since_entry") or entry_price
+
+            fixed_stop    = entry_price * (1 + params["fixed"])     # e.g. entry × 0.85
+            trailing_stop = high_price  * (1 + params["trailing"])  # e.g. high  × 0.75
+
+            if trailing_stop > fixed_stop:
+                reminders.append({
+                    "symbol":       symbol,
+                    "tranche_n":    t["n"] if multi else None,
+                    "entry_price":  entry_price,
+                    "high_price":   high_price,
+                    "fixed_stop":   fixed_stop,
+                    "trailing_stop": trailing_stop,
+                    "trailing_pct": abs(params["trailing"]) * 100,
+                })
+
+    return reminders
+
+
 def _check_triple_warning(breadth_status, market_env, actions):
     """
     三重警告：廣度偏弱 + 市場環境差 + ADD 候選 ML% 全面低迷。
@@ -579,6 +631,17 @@ def run_premarket(scan_tw=False):
                     print(f"         {prefix} 批{t['n']}({stop_label}) {t['shares']:>3}股 @${t['entry_price']:.0f}  P&L:{t_pnl_str:>7}  {protect_str}")
         print()
 
+    # 停損單更新提醒（追蹤停損 > 固定停損時，需調高 Firstrade 掛單）
+    stop_reminders = _get_stop_update_reminders(portfolio, current_prices)
+    if stop_reminders:
+        print("--- 📌 停損單需更新（追蹤停損 > 固定停損）---")
+        for r in stop_reminders:
+            batch_str = f" 第{r['tranche_n']}批" if r["tranche_n"] is not None else ""
+            print(f"  {r['symbol']:<6}{batch_str:<5}  "
+                  f"原掛 ${r['fixed_stop']:>7.2f}  →  改掛 ${r['trailing_stop']:>7.2f}"
+                  f"  （高點 ${r['high_price']:.2f} × {100-r['trailing_pct']:.0f}%）")
+        print()
+
     if new_adds or pyramid_adds or backup_adds:
         max_adds = breadth_status["suggested_max_adds"]
         breadth_note = ""
@@ -736,7 +799,56 @@ def run_premarket(scan_tw=False):
         with open(actions_path, "w", encoding="utf-8") as f:
             json.dump(actions_output, f, indent=2, ensure_ascii=False)
 
-    # 9. 發送 Email 通知
+    # 9. 今日待辦清單（操作摘要，執行優先順序）
+    exit_actions   = [a for a in actions if a["action"] == "EXIT"]
+    add_actions    = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
+    rotate_actions = [a for a in actions if a["action"] == "ROTATE"]
+    stop_reminders = _get_stop_update_reminders(portfolio, current_prices)
+
+    has_todo = exit_actions or stop_reminders or add_actions or rotate_actions
+    if has_todo:
+        width = 52
+        print("╔" + "═" * width + "╗")
+        print(f"║  {'📋 今日待辦清單（開盤前確認）':<{width-2}}║")
+        print("╠" + "═" * width + "╣")
+
+        if exit_actions:
+            print(f"║  {'🔴 EXIT — 立即執行（停損已觸發）':<{width-2}}║")
+            for a in exit_actions:
+                tranche_str = f" 第{a['tranche_n']}批" if a.get("tranche_n") else ""
+                line = f"     {a['symbol']}{tranche_str}  {a['shares']} 股 @ ${a.get('current_price', 0):.2f}"
+                print(f"║  {line:<{width-2}}║")
+
+        if stop_reminders:
+            if exit_actions:
+                print("╠" + "─" * width + "╣")
+            print(f"║  {'📌 停損單需更新（Firstrade 調整掛單）':<{width-2}}║")
+            for r in stop_reminders:
+                batch_str = f" 第{r['tranche_n']}批" if r["tranche_n"] is not None else ""
+                line = f"     {r['symbol']}{batch_str}  → 改掛 ${r['trailing_stop']:.2f}"
+                print(f"║  {line:<{width-2}}║")
+
+        if rotate_actions:
+            if exit_actions or stop_reminders:
+                print("╠" + "─" * width + "╣")
+            print(f"║  {'🔄 ROTATE — 汰弱留強（擇機執行）':<{width-2}}║")
+            for a in rotate_actions:
+                line = f"     賣 {a['sell_symbol']} → 買 {a['buy_symbol']}  {a['buy_shares']} 股"
+                print(f"║  {line:<{width-2}}║")
+
+        if add_actions:
+            if exit_actions or stop_reminders or rotate_actions:
+                print("╠" + "─" * width + "╣")
+            print(f"║  {'🟢 ADD — 新倉/加碼（視現金與判斷執行）':<{width-2}}║")
+            for a in add_actions:
+                pyramid_str = f" 第{a['tranche_n']}批加碼" if a.get("is_pyramid") else ""
+                line = f"     {a['symbol']}{pyramid_str}  {a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}"
+                print(f"║  {line:<{width-2}}║")
+
+        print("╚" + "═" * width + "╝")
+        print()
+
+    # 10. 發送 Email 通知
     notifier = GmailNotifier()
     if notifier.is_configured():
         print("正在發送 Email 通知...")

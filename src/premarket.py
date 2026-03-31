@@ -388,7 +388,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 return 999  # 無法解析就當作很久了
         return 999
 
-    # 可換股的持倉：排除核心、偏愛、已出場、保護期內
+    # 可換股的持倉：排除核心、偏愛、已出場、保護期內、轉強中
     rotatable_positions = [
         (sym, pos, momentum_map.get(sym, {}).get("momentum"), get_holding_days(pos))
         for sym, pos in positions.items()
@@ -397,6 +397,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         and sym not in exit_symbols
         and momentum_map.get(sym, {}).get("momentum") is not None
         and get_holding_days(pos) >= ROTATE_HOLDING_DAYS_MIN
+        and trend_state_map.get(sym, {}).get("state") != "轉強"  # 轉強中不換，動能即將回升
     ]
 
     # 按動能排序（最弱的在前）

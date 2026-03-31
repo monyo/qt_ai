@@ -68,14 +68,14 @@ def _get_sp500_df():
 
 def get_sp500_tickers():
     """從維基百科抓取 S&P 500 成份股代碼"""
-    return _get_sp500_df()['Symbol'].tolist()
+    return [s.replace('.', '-') for s in _get_sp500_df()['Symbol'].tolist()]
 
 
 def get_sp500_sector_map():
     """返回 {symbol: 中文板塊名稱}，來源同 Wikipedia S&P 500 表格（共用快取）"""
     df = _get_sp500_df()
     return {
-        row['Symbol']: _SECTOR_ZH.get(row['GICS Sector'], row['GICS Sector'])
+        row['Symbol'].replace('.', '-'): _SECTOR_ZH.get(row['GICS Sector'], row['GICS Sector'])
         for _, row in df.iterrows()
     }
 
