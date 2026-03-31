@@ -381,9 +381,11 @@ else:
 df_feat["ml_prob"] = final_model.predict_proba(X_all)[:, 1]
 
 rebalance_dates = pd.bdate_range("2021-01-01", "2025-09-01", freq="BMS")
-results_A = []
-results_E = []
+results_A    = []
+results_E    = []
+results_F    = []
 win_E_over_A = 0
+win_F_over_A = 0
 total_months = 0
 
 for ref in rebalance_dates:
@@ -424,18 +426,27 @@ for ref in rebalance_dates:
     top_E  = top150.nlargest(TOP_N, "ml_prob")["symbol"].tolist()
     alpha_E = avg_alpha(top_E)
 
-    if alpha_A is not None and alpha_E is not None:
+    # ── 策略 F：純 ML top5（全市場不限動能，直接取 ML 最高 5 支）──
+    top_F   = month_df.nlargest(TOP_N, "ml_prob")["symbol"].tolist()
+    alpha_F = avg_alpha(top_F)
+
+    if alpha_A is not None and alpha_E is not None and alpha_F is not None:
         results_A.append(alpha_A)
         results_E.append(alpha_E)
+        results_F.append(alpha_F)
         if alpha_E > alpha_A:
             win_E_over_A += 1
+        if alpha_F > alpha_A:
+            win_F_over_A += 1
         total_months += 1
 
 med_A = float(np.median(results_A)) if results_A else 0
 med_E = float(np.median(results_E)) if results_E else 0
+med_F = float(np.median(results_F)) if results_F else 0
 
-print(f"  A. 純動能 top5    1M alpha 中位 {med_A:+.2f}%")
-print(f"  E. ML top5        1M alpha 中位 {med_E:+.2f}%  勝A: {win_E_over_A}/{total_months}月")
+print(f"  A. 純動能 top5              1M alpha 中位 {med_A:+.2f}%")
+print(f"  E. ML top5（動能前150篩選）  1M alpha 中位 {med_E:+.2f}%  勝A: {win_E_over_A}/{total_months}月")
+print(f"  F. 純ML top5（全市場不限）   1M alpha 中位 {med_F:+.2f}%  勝A: {win_F_over_A}/{total_months}月")
 print()
 
 
