@@ -124,6 +124,14 @@ Quantitative stock scanning + position management system. Combines technical ana
   - 差異停損：第1批 -15%/-25%，第2批 -10%/-15%，第3批+ -7%/-10%（越晚越緊）
   - 保護期（30/15/7 天）只阻擋 EXIT，不阻擋加碼 ADD
   - 回調後加碼（後批價格 < 前批）用標準停損，入場價本身是保護
+  - **stop_type 校正**：`apply_confirmed_actions` 用實際成交價 vs 前批成本重算（而非盤前推薦當時的市價），確保「越貴的批次有越高的固定停損價」
+- **停損單更新提醒**（`_get_stop_update_reminders` in `premarket_main.py`）：
+  - 每日盤前計算各持倉批次的追蹤停損價（高點 × trailing%）vs 固定停損價（成本 × fixed%）
+  - 追蹤停損 > 固定停損時，在 HOLD 區段後顯示「📌 停損單需更新」，列出需調整的 Firstrade 掛單價格
+  - Firstrade 每個標的只能掛一張停損單：多批次時取最嚴格（最高）的停損價，全部股數一起掛
+- **今日待辦清單**：盤前報告末尾以框線顯示優先順序摘要
+  - 🔴 EXIT（立即執行）→ 📌 停損單更新 → 🔄 ROTATE → 🟢 ADD
+  - 設計目的：降低「看到建議但沒執行」的操作漏洞，EXIT 是策略紀律，當天必須執行
 - **ADD 清單**：
   - 同時顯示「現金」與「ROTATE 後」兩種股數建議（`suggested_shares_post_rotate`）
   - TOPUP 機制已移除，統一用金字塔邏輯管理加碼
