@@ -14,7 +14,7 @@ from src.portfolio import (
 )
 from src.data_loader import get_sp500_tickers, fetch_current_prices, get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map
 from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
-from src.risk import check_position_limit, TRANCHE_PARAMS
+from src.risk import check_position_limit, TRANCHE_PARAMS, update_dynamic_trailing
 from src.premarket import generate_actions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.market_environment import get_market_environment
@@ -173,7 +173,10 @@ def _get_stop_update_reminders(portfolio, current_prices):
             high_price  = t.get("high") or pos.get("high_since_entry") or entry_price
 
             fixed_stop    = entry_price * (1 + params["fixed"])     # e.g. entry × 0.85
-            trailing_stop = high_price  * (1 + params["trailing"])  # e.g. high  × 0.75
+            # 使用動態收緊後的 trailing_pct（若已收緊）
+            eff_trailing  = t.get("trailing_pct", abs(params["trailing"]))
+            trailing_stop = high_price * (1 - eff_trailing)
+            tightened     = "trailing_pct" in t  # 是否已動態收緊
 
             if trailing_stop > fixed_stop:
                 reminders.append({
@@ -183,7 +186,8 @@ def _get_stop_update_reminders(portfolio, current_prices):
                     "high_price":   high_price,
                     "fixed_stop":   fixed_stop,
                     "trailing_stop": trailing_stop,
-                    "trailing_pct": abs(params["trailing"]) * 100,
+                    "trailing_pct": eff_trailing * 100,
+                    "tightened":    tightened,
                 })
 
     return reminders
@@ -338,6 +342,12 @@ def run_premarket(scan_tw=False):
     if high_updated:
         save_portfolio(portfolio)
         print("已更新持倉最高價記錄")
+
+    # 4.6b 動態收緊追蹤停損（持倉獲利 ≥ +25% 時，追蹤停損從原始值收緊）
+    newly_tightened = update_dynamic_trailing(portfolio, current_prices)
+    if newly_tightened:
+        save_portfolio(portfolio)
+        print(f"🔒 追蹤停損已收緊：{', '.join(newly_tightened)}")
 
     # 4.7 計算 1 年超額報酬（ADD 候選 + 持倉，用於長期績效參考）
     # 取前 45 名確保涵蓋主要候選（5個）+ 備選（3個），前幾名可能已持有
@@ -628,7 +638,8 @@ def run_premarket(scan_tw=False):
                     stop_label = stop_labels.get(t.get("stop_type", "standard"), "")
                     t_pnl = (price - t["entry_price"]) / t["entry_price"] * 100 if price and t["entry_price"] else None
                     t_pnl_str = f"{t_pnl:+.1f}%" if t_pnl is not None else "N/A"
-                    print(f"         {prefix} 批{t['n']}({stop_label}) {t['shares']:>3}股 @${t['entry_price']:.0f}  P&L:{t_pnl_str:>7}  {protect_str}")
+                    tight_mark = " 🔒" if "trailing_pct" in t else ""
+                    print(f"         {prefix} 批{t['n']}({stop_label}) {t['shares']:>3}股 @${t['entry_price']:.0f}  P&L:{t_pnl_str:>7}  {protect_str}{tight_mark}")
         print()
 
     # 停損單更新提醒（追蹤停損 > 固定停損時，需調高 Firstrade 掛單）
@@ -637,9 +648,10 @@ def run_premarket(scan_tw=False):
         print("--- 📌 停損單需更新（追蹤停損 > 固定停損）---")
         for r in stop_reminders:
             batch_str = f" 第{r['tranche_n']}批" if r["tranche_n"] is not None else ""
+            tight_mark = " 🔒收緊" if r.get("tightened") else ""
             print(f"  {r['symbol']:<6}{batch_str:<5}  "
                   f"原掛 ${r['fixed_stop']:>7.2f}  →  改掛 ${r['trailing_stop']:>7.2f}"
-                  f"  （高點 ${r['high_price']:.2f} × {100-r['trailing_pct']:.0f}%）")
+                  f"  （高點 ${r['high_price']:.2f} 追蹤{r['trailing_pct']:.0f}%{tight_mark}）")
         print()
 
     if new_adds or pyramid_adds or backup_adds:

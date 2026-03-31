@@ -7,6 +7,15 @@ TRANCHE_PARAMS = {
     "tight_3":  {"fixed": -0.07, "trailing": -0.10, "protect":  7},
 }
 
+# 動態收緊追蹤停損：獲利達 +25% 時，把追蹤停損從原始值收緊
+# 回測顯示：Calmar 0.516 → 0.620（+0.104），優於分批停利
+TIGHTEN_THRESHOLD = 0.25
+TIGHTEN_MAP = {
+    "standard": 0.15,   # 原 0.25 → 收緊至 0.15
+    "tight_2":  0.10,   # 原 0.15 → 收緊至 0.10
+    "tight_3":  0.07,   # 原 0.10 → 收緊至 0.07
+}
+
 
 def check_stop_loss(positions, current_prices, threshold=-0.35):
     """檢查持倉是否觸發極端停損（從成本價計算）
@@ -203,9 +212,10 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
                 })
                 continue
 
-            # 2. 追蹤停損（從批次最高點）
+            # 2. 追蹤停損（從批次最高點，使用動態收緊後的 trailing_pct 若有）
             if t_high > 0:
-                trailing_stop_price = t_high * (1 + params["trailing"])
+                eff_trailing = t.get("trailing_pct", abs(params["trailing"]))
+                trailing_stop_price = t_high * (1 - eff_trailing)
                 from_high = (price - t_high) / t_high
                 if price <= trailing_stop_price:
                     triggered.append({
@@ -249,6 +259,36 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
             exits[symbol] = triggered
 
     return exits
+
+
+def update_dynamic_trailing(portfolio, current_prices):
+    """檢查各批次獲利是否達 +25%，若是則收緊追蹤停損 trailing_pct
+
+    Returns:
+        list of str: 本次新收緊的 "(symbol 第N批)" 說明
+    """
+    newly_tightened = []
+    for symbol, pos in portfolio.get("positions", {}).items():
+        if pos.get("core"):
+            continue
+        price = current_prices.get(symbol)
+        if price is None:
+            continue
+        _ensure_tranches(pos)
+        for t in pos["tranches"]:
+            stop_type = t.get("stop_type", "standard")
+            # 已收緊過就跳過（trailing_pct 已存在）
+            if "trailing_pct" in t:
+                continue
+            entry_price = t.get("entry_price", pos.get("avg_price", 0))
+            if entry_price <= 0:
+                continue
+            pnl = (price - entry_price) / entry_price
+            if pnl >= TIGHTEN_THRESHOLD:
+                tightened = TIGHTEN_MAP.get(stop_type, 0.15)
+                t["trailing_pct"] = tightened
+                newly_tightened.append(f"{symbol} 第{t['n']}批（{stop_type}→{tightened*100:.0f}%）")
+    return newly_tightened
 
 
 def check_position_limit(portfolio, max_stocks=30):
