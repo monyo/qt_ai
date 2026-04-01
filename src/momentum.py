@@ -353,11 +353,21 @@ def calculate_trend_state(symbol: str) -> dict | None:
         else:
             state = "盤整"
 
-        return {
+        result = {
             "bounce_pct": round(bounce_pct, 1),
             "from_high_pct": round(from_high_pct, 1),
             "state": state,
         }
+
+        # 強彈偵測：轉弱格局中單日漲幅 ≥ +8%（回測：63天回前高率 44% vs 對照組 27%）
+        if state == "轉弱" and len(df) >= 2:
+            prev_close = float(df['Close'].iloc[-2])
+            if prev_close > 0:
+                day_ret = current / prev_close - 1
+                if day_ret >= 0.08:
+                    result["strong_bounce_pct"] = round(day_ret * 100, 1)
+
+        return result
     except Exception:
         return None
 

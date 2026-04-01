@@ -594,6 +594,8 @@ def run_premarket(scan_tw=False):
                 ts_str = f"  {ts_emoji}{ts['state']}"
                 if ts["state"] == "轉弱":
                     ts_str += f"(距高{ts['from_high_pct']:+.0f}%)"
+                    if ts.get("strong_bounce_pct"):
+                        ts_str += f" 🔄強彈+{ts['strong_bounce_pct']:.0f}%"
                 elif ts["state"] == "轉強":
                     ts_str += f"(反彈{ts['bounce_pct']:+.0f}%)"
             else:

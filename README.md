@@ -74,6 +74,38 @@ python confirm_main.py 2026-02-19
 
 ---
 
+## 透過 Claude Code Agent 使用（推薦）
+
+安裝完成後，在專案目錄開啟 Claude Code，可以直接用 slash commands 操作，不需要記任何腳本名稱。
+
+### 第一步：告訴 Agent 你的持倉
+
+用自然語言描述你目前的持倉，Agent 會幫你建立 `data/portfolio.json`：
+
+```
+我目前持有：
+- VOO  20 股，成本均價 $520，核心持倉不賣
+- NVDA 10 股，成本均價 $135，2025-06-01 買入
+- 現金 $5,000
+
+請幫我建立初始持倉
+```
+
+Agent 會自動呼叫 `python premarket_main.py --init` 並根據你的描述填入資料。
+
+> 或者直接跑 `python premarket_main.py --init` 進入互動式建立流程。
+
+### 每日工作流程（使用 slash commands）
+
+```
+/premarket      → 盤前分析，查看今日 EXIT/ADD 建議，可直接追問
+/confirm DATE   → 盤後確認哪些有執行，更新持倉
+/exit-check     → 快速確認有無停損觸發（不跑完整分析）
+/perf           → 績效三路比較（B&H vs 實際 vs System-Perfect vs SPY）
+```
+
+---
+
 ## 功能列表
 
 | 功能 | 說明 |
