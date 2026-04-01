@@ -14,7 +14,7 @@ MAX_PYRAMID = 5       # 最大批次數（同回測最佳參數）
 MAX_PYRAMID_SHOW = 3  # 每日最多顯示的金字塔加碼建議數
 
 
-def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None, trend_state_map=None, alpha_3y_map=None, market_regime="BULL"):
+def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None, trend_state_map=None, alpha_3y_map=None, market_regime="BULL", vix=20.0, volumes=None):
     """盤前決策引擎（動能策略 + 三層出場 + 趨勢狀態 + 市場體制）
 
     Args:
@@ -53,9 +53,10 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
     # 1. 固定停損（-15% from cost）
     # 2. MA200 停損
     # 3. 極端停損（-35% from cost，備用）
-    exit_signals = check_all_exit_conditions(
+    exit_signals, pending_stops = check_all_exit_conditions(
         positions, current_prices, ma200_prices,
-        fixed_threshold=-0.15, hard_threshold=-0.35
+        fixed_threshold=-0.15, hard_threshold=-0.35,
+        vix=vix or 20.0, volumes=volumes,
     )
 
     # === 2. 遍歷所有持倉，產出 HOLD / EXIT ===
@@ -140,6 +141,9 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 elif trend_state["state"] == "轉強" and (momentum is not None and momentum < 0):
                     reason += " 💡 V轉回升中"
 
+            # 停損待確認（首日觸發，明日再確認）
+            stop_pending_items = pending_stops.get(symbol)
+
             action_id += 1
             _ensure_tranches(pos)
             actions.append({
@@ -159,6 +163,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "source": "momentum",
                 "status": "auto",
                 "tranches": pos["tranches"],
+                "stop_pending": stop_pending_items,   # list or None
             })
 
     # === 3. 新增買入候選（依動能排名，BEAR 市場暫停） ===

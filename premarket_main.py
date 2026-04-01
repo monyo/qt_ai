@@ -12,7 +12,7 @@ from src.portfolio import (
     load_watchlist, save_watchlist, add_to_watchlist,
     update_high_prices, initialize_high_prices,
 )
-from src.data_loader import get_sp500_tickers, fetch_current_prices, get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map
+from src.data_loader import get_sp500_tickers, fetch_current_prices, fetch_volumes, get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map
 from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
 from src.risk import check_position_limit, TRANCHE_PARAMS, update_dynamic_trailing
 from src.premarket import generate_actions, VERSION
@@ -349,6 +349,10 @@ def run_premarket(scan_tw=False):
         save_portfolio(portfolio)
         print(f"🔒 追蹤停損已收緊：{', '.join(newly_tightened)}")
 
+    # 4.6c 取得持倉成交量（供停損確認過濾使用）
+    print(f"正在取得 {len(held_symbols)} 檔持倉成交量...")
+    held_volumes = fetch_volumes(held_symbols)
+
     # 4.7 計算 1 年超額報酬（ADD 候選 + 持倉，用於長期績效參考）
     # 取前 45 名確保涵蓋主要候選（5個）+ 備選（3個），前幾名可能已持有
     add_candidates = [m["symbol"] for m in momentum_ranks[:45] if m["symbol"] not in positions]
@@ -371,7 +375,13 @@ def run_premarket(scan_tw=False):
     breadth_status = get_breadth_status()
 
     # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態 + 市場體制）
-    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map, market_regime=regime["regime"])
+    actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map, market_regime=regime["regime"],
+                               vix=market_env.get("vix_level", 20.0), volumes=held_volumes)
+
+    # 5.1 儲存 pending 停損狀態（stop_pending_since 已寫入 portfolio tranches）
+    has_pending = any(a.get("stop_pending") for a in actions if a["action"] == "HOLD")
+    if has_pending:
+        save_portfolio(portfolio)
 
     # 5.5 重算 ROTATE 後的 ADD 股數（新倉 + 金字塔共用，備選不占位）
     CASH_SAFETY_FACTOR = 0.85
@@ -625,6 +635,15 @@ def run_premarket(scan_tw=False):
             tag = "[core]" if a["source"] == "core_hold" else "      "
             sector_tag = f"[{a['sector']}]" if a.get('sector') else ""
             print(f"  {tag} {a['symbol']}{sector_tag}  {a['shares']} 股 @ ${price:.2f}  P&L: {pnl}  {momentum}{alpha_str}{ts_str}{trail_str}{protect_inline}")
+            # 停損待確認警告
+            stop_pending = a.get("stop_pending")
+            if stop_pending:
+                for sp in stop_pending:
+                    vol_r = sp.get("vol_ratio")
+                    vol_tag = f"  量比={vol_r:.1f}x" if vol_r is not None else ""
+                    vix_m = sp.get("vix_mult", 1.0)
+                    vix_tag = f"  VIX展寬×{vix_m:.1f}" if vix_m > 1 else ""
+                    print(f"         ⚠️  停損待確認（第{sp['tranche_n']}批）{vix_tag}{vol_tag}  {sp['message']}  → 明日仍觸發則出場")
             # 多批次：逐批顯示保護期
             if len(tranches) > 1:
                 stop_labels = {"standard": "標準", "tight_2": "↑緊", "tight_3": "↑↑緊"}

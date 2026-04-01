@@ -153,9 +153,25 @@ def check_ma200_stop(positions, current_prices, ma200_prices):
     return triggered
 
 
+# 反停損獵殺對策（回測：組合策略 Calmar +3.46% vs 基準，2020-2026）
+# B 兩日確認 + C 成交量確認 + D VIX 展寬
+VIX_WIDEN = {25: 1.5, 35: 2.0}   # VIX 門檻 → 停損距離倍數
+VIX_WIDEN_MAX = 0.50              # 追蹤停損展寬上限（不超過 -50%）
+FIXED_WIDEN_MAX = 0.35            # 固定停損展寬上限（不超過 -35%）
+VOL_CONFIRM_RATIO = 0.8           # 成交量確認門檻（低於 20MA×0.8 視為低量）
+
+
+def _vix_multiplier(vix: float) -> float:
+    if vix >= 35:
+        return VIX_WIDEN[35]
+    if vix >= 25:
+        return VIX_WIDEN[25]
+    return 1.0
+
+
 def check_all_exit_conditions(positions, current_prices, ma200_prices,
                                fixed_threshold=-0.15, hard_threshold=-0.35,
-                               trailing_pct=0.25):
+                               trailing_pct=0.25, vix=20.0, volumes=None):
     """逐批次檢查出場條件，回傳需要出場的持倉
 
     每個 tranche 按各自的 stop_type 套用差異停損參數：
@@ -163,13 +179,22 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
     - tight_2:  fixed -10%, trailing -15%, 保護 15 天（上漲加碼第2批）
     - tight_3:  fixed -7%,  trailing -10%, 保護 7 天（上漲加碼第3批+）
 
+    反停損獵殺對策（vix + volumes 啟用時）：
+    - VIX 展寬：VIX>25 停損距離×1.5，VIX>35 ×2.0
+    - 兩日確認：首次觸發設 stop_pending_since，隔日仍觸發才出場
+    - 成交量確認：低量（<20MA×0.8）觸發視為低可信度，同樣進兩日確認
+
     Returns:
-        dict: {symbol: [{"tranche_n": int, "tranche_shares": int,
-                         "reason": str, "message": str, "details": dict}, ...]}
+        (exits, pending_notices)
+        exits:   {symbol: [tranche_exit, ...]}   — 確認出場（立即執行）
+        pending: {symbol: [tranche_pending, ...]} — 首日觸發待確認（明日觀察）
         每個 symbol 的列表按 tranche_n 降序排列（先出最新批次）
     """
-    today = _date.today()
-    exits = {}
+    today     = _date.today()
+    today_str = str(today)
+    vix_mult  = _vix_multiplier(vix or 20.0)
+    exits     = {}
+    pending   = {}
 
     for symbol, pos in positions.items():
         if pos.get("core", False):
@@ -179,86 +204,127 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
             continue
 
         _ensure_tranches(pos)
-        triggered = []
+        sym_exits   = []
+        sym_pending = []
+
+        # 成交量資料
+        vol_data  = (volumes or {}).get(symbol, {})
+        vol       = vol_data.get("volume", 0)
+        vol_ma    = vol_data.get("vol_ma20", 0)
+        low_vol   = vol_ma > 0 and vol < vol_ma * VOL_CONFIRM_RATIO
+        vol_ratio = round(vol / vol_ma, 2) if vol_ma > 0 else None
 
         for t in pos["tranches"]:
             stop_type = t.get("stop_type", "standard")
-            params = TRANCHE_PARAMS.get(stop_type, TRANCHE_PARAMS["standard"])
+            params    = TRANCHE_PARAMS.get(stop_type, TRANCHE_PARAMS["standard"])
 
             # 保護期檢查
             try:
                 entry_date = _date.fromisoformat(t["entry_date"])
-                days_held = (today - entry_date).days
+                days_held  = (today - entry_date).days
             except (ValueError, KeyError):
-                days_held = 999
+                days_held  = 999
 
             if days_held < params["protect"]:
+                t.pop("stop_pending_since", None)
                 continue
 
-            n = t["n"]
+            n           = t["n"]
             entry_price = t["entry_price"]
-            t_high = t.get("high", entry_price)
-            t_shares = t["shares"]
+            t_high      = t.get("high", entry_price)
+            t_shares    = t["shares"]
 
-            # 1. 固定停損（從批次進場成本）
-            fixed_stop_price = entry_price * (1 + params["fixed"])
-            if price <= fixed_stop_price:
-                triggered.append({
-                    "tranche_n": n,
-                    "tranche_shares": t_shares,
-                    "reason": "fixed_stop",
-                    "message": f"固定停損觸發（第{n}批，成本 ${entry_price:.2f}，停損 ${fixed_stop_price:.2f}，目前 {(price-entry_price)/entry_price*100:.1f}%）",
-                    "details": {"entry_price": entry_price, "stop_price": fixed_stop_price, "current_price": price},
-                })
+            # ── 計算有效停損位（含 VIX 展寬）────────────────────────────
+            raw_fixed_dist  = abs(params["fixed"])
+            eff_fixed_dist  = min(raw_fixed_dist * vix_mult, FIXED_WIDEN_MAX)
+            fixed_stop_price = entry_price * (1 - eff_fixed_dist)
+
+            eff_trailing      = t.get("trailing_pct", abs(params["trailing"]))
+            eff_trail_dist    = min(eff_trailing * vix_mult, VIX_WIDEN_MAX)
+            trailing_stop_price = t_high * (1 - eff_trail_dist) if t_high > 0 else 0
+
+            # 是否觸發任一停損
+            fixed_hit   = price <= fixed_stop_price
+            trail_hit   = t_high > 0 and price <= trailing_stop_price
+            stop_hit    = fixed_hit or trail_hit
+
+            # ── 價格回復：清除待確認 ──────────────────────────────────────
+            if not stop_hit:
+                if t.get("stop_pending_since"):
+                    t.pop("stop_pending_since", None)
+                # 3. MA200 停損（不做兩日確認）
+                if stop_type == "standard":
+                    ma200 = ma200_prices.get(symbol)
+                    if ma200 is not None and price < ma200:
+                        sym_exits.append({
+                            "tranche_n":      n,
+                            "tranche_shares": t_shares,
+                            "reason":         "ma200_stop",
+                            "message":        f"跌破 MA200（第{n}批，MA200 ${ma200:.2f}，{(price-ma200)/ma200*100:.1f}%）",
+                            "details":        {"ma200": ma200, "current_price": price},
+                        })
+                        continue
+                    # 4. 極端停損（-35%，不做兩日確認）
+                    avg_price = pos.get("avg_price", entry_price)
+                    if avg_price > 0:
+                        pnl_pct = (price - avg_price) / avg_price
+                        if pnl_pct <= hard_threshold:
+                            sym_exits.append({
+                                "tranche_n":      n,
+                                "tranche_shares": t_shares,
+                                "reason":         "extreme_stop",
+                                "message":        f"極端停損觸發（第{n}批，從成本 {pnl_pct*100:.1f}%）",
+                                "details":        {"avg_price": avg_price, "pnl_pct": pnl_pct, "current_price": price},
+                            })
                 continue
 
-            # 2. 追蹤停損（從批次最高點，使用動態收緊後的 trailing_pct 若有）
-            if t_high > 0:
-                eff_trailing = t.get("trailing_pct", abs(params["trailing"]))
-                trailing_stop_price = t_high * (1 - eff_trailing)
+            # ── 固定/追蹤停損觸發（應用兩日確認）────────────────────────
+            if fixed_hit:
+                reason  = "fixed_stop"
+                vix_tag = f"（VIX={vix:.0f}，展寬至 {eff_fixed_dist*100:.0f}%）" if vix_mult > 1 else ""
+                msg     = (f"固定停損觸發{vix_tag}（第{n}批，成本 ${entry_price:.2f}，"
+                           f"停損 ${fixed_stop_price:.2f}，目前 {(price-entry_price)/entry_price*100:.1f}%）")
+                details = {"entry_price": entry_price, "stop_price": fixed_stop_price,
+                           "current_price": price, "vix_mult": vix_mult}
+            else:
                 from_high = (price - t_high) / t_high
-                if price <= trailing_stop_price:
-                    triggered.append({
-                        "tranche_n": n,
-                        "tranche_shares": t_shares,
-                        "reason": "trailing_stop",
-                        "message": f"追蹤停損觸發（第{n}批，最高 ${t_high:.2f}，回落 {from_high*100:.1f}%）",
-                        "details": {"high": t_high, "trailing_stop": trailing_stop_price, "current_price": price},
-                    })
-                    continue
+                reason  = "trailing_stop"
+                vix_tag = f"（VIX={vix:.0f}，展寬至 {eff_trail_dist*100:.0f}%）" if vix_mult > 1 else ""
+                msg     = (f"追蹤停損觸發{vix_tag}（第{n}批，最高 ${t_high:.2f}，"
+                           f"回落 {from_high*100:.1f}%）")
+                details = {"high": t_high, "trailing_stop": trailing_stop_price,
+                           "current_price": price, "vix_mult": vix_mult}
 
-            # 3. MA200 停損（僅 standard 批次）
-            if stop_type == "standard":
-                ma200 = ma200_prices.get(symbol)
-                if ma200 is not None and price < ma200:
-                    triggered.append({
-                        "tranche_n": n,
-                        "tranche_shares": t_shares,
-                        "reason": "ma200_stop",
-                        "message": f"跌破 MA200（第{n}批，MA200 ${ma200:.2f}，{(price-ma200)/ma200*100:.1f}%）",
-                        "details": {"ma200": ma200, "current_price": price},
-                    })
-                    continue
+            item = {
+                "tranche_n":      n,
+                "tranche_shares": t_shares,
+                "reason":         reason,
+                "message":        msg,
+                "details":        details,
+            }
 
-                # 4. 極端停損（-35%，僅 standard，用整體 avg_price）
-                avg_price = pos.get("avg_price", entry_price)
-                if avg_price > 0:
-                    pnl_pct = (price - avg_price) / avg_price
-                    if pnl_pct <= hard_threshold:
-                        triggered.append({
-                            "tranche_n": n,
-                            "tranche_shares": t_shares,
-                            "reason": "extreme_stop",
-                            "message": f"極端停損觸發（第{n}批，從成本 {pnl_pct*100:.1f}%）",
-                            "details": {"avg_price": avg_price, "pnl_pct": pnl_pct, "current_price": price},
-                        })
+            pending_since = t.get("stop_pending_since")
+            if pending_since:
+                # 第二日確認 → 真正出場
+                t.pop("stop_pending_since", None)
+                sym_exits.append(item)
+            else:
+                # 第一日 → 設待確認（兩日確認 + 成交量雙重保護）
+                t["stop_pending_since"] = today_str
+                notice = dict(item)
+                notice["pending_reason"] = "low_volume" if low_vol else "two_day_confirm"
+                notice["vol_ratio"]      = vol_ratio
+                notice["vix_mult"]       = vix_mult
+                sym_pending.append(notice)
 
-        if triggered:
-            # 按 tranche_n 降序（先出最新批次）
-            triggered.sort(key=lambda x: x["tranche_n"], reverse=True)
-            exits[symbol] = triggered
+        if sym_exits:
+            sym_exits.sort(key=lambda x: x["tranche_n"], reverse=True)
+            exits[symbol] = sym_exits
+        if sym_pending:
+            sym_pending.sort(key=lambda x: x["tranche_n"], reverse=True)
+            pending[symbol] = sym_pending
 
-    return exits
+    return exits, pending
 
 
 def update_dynamic_trailing(portfolio, current_prices):

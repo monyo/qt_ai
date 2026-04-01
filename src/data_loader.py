@@ -98,6 +98,44 @@ def fetch_current_prices(symbols):
     return prices
 
 
+def fetch_volumes(symbols):
+    """批次取得最新成交量 + 20日均量（用於停損確認過濾）
+
+    Returns:
+        dict: {symbol: {"volume": float, "vol_ma20": float}}
+    """
+    result = {}
+    if not symbols:
+        return result
+    try:
+        import yfinance as yf
+        raw = yf.download(list(symbols), period="30d", auto_adjust=True, progress=False)
+        vol_df = raw["Volume"] if "Volume" in raw else None
+        if vol_df is None:
+            return result
+        if hasattr(vol_df, "columns"):
+            for sym in symbols:
+                if sym in vol_df.columns:
+                    s = vol_df[sym].dropna()
+                    if len(s) >= 2:
+                        result[sym] = {
+                            "volume":   float(s.iloc[-1]),
+                            "vol_ma20": float(s.tail(20).mean()),
+                        }
+        else:
+            # 單檔回傳 Series
+            sym = list(symbols)[0]
+            s = vol_df.dropna()
+            if len(s) >= 2:
+                result[sym] = {
+                    "volume":   float(s.iloc[-1]),
+                    "vol_ma20": float(s.tail(20).mean()),
+                }
+    except Exception as e:
+        print(f"⚠ fetch_volumes 失敗: {e}")
+    return result
+
+
 def get_tw50_tickers():
     """取得台灣50成分股 + 熱門概念股代碼（yfinance 格式）"""
     return [
