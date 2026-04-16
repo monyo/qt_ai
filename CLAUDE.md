@@ -51,7 +51,7 @@ python stop_loss_compare.py NVDA SHOP TSLA GOOG MU
 python portfolio_backtest.py
 
 # 追蹤停損門檻敏感度掃描（-10% 至 -40%）
-python _trailing_sensitivity.py
+python research/_trailing_sensitivity.py
 
 # 板塊相對強弱獨立檢查
 python -c "from src.sector_monitor import print_sector_report; print_sector_report()"
@@ -105,7 +105,7 @@ Quantitative stock scanning + position management system. Combines technical ana
 
 - **Actions 狀態流**：`pending` → `confirmed`/`skipped`，HOLD 為 `auto`
 - **停損機制**（四層，依優先順序）：
-  - **波動率分層停損**（`vol_adjusted_stops` in `risk.py`，回測驗證 `_vol_stop_sensitivity.py`）：
+  - **波動率分層停損**（`vol_adjusted_stops` in `risk.py`，回測驗證 `research/_vol_stop_sensitivity.py`）：
     - 低波動（<35%）：固定 -15%、追蹤 -25%（標準）
     - 中波動（35–60%）：固定 -16%、追蹤 -24%（緊停損作品質過濾，Calmar 12.845 vs -22%的 11.391）
     - 高波動（>60%）：固定 -25%、追蹤 -35%（寬停損避免雜訊）

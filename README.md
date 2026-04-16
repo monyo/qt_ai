@@ -189,16 +189,16 @@ python confirm_main.py 2026-02-19
 python portfolio_backtest.py
 
 # 追蹤停損門檻敏感度掃描（-10% 至 -40%）
-python _trailing_sensitivity.py
+python research/_trailing_sensitivity.py
 
 # 停損策略比較（單股）
 python stop_loss_compare.py NVDA SHOP TSLA GOOG MU
 
 # 趨勢狀態指標回測（V轉/倒V 的預測力驗證）
-python trend_state_backtest.py
+python research/trend_state_backtest.py
 
 # 動能回看週期比較（21d vs 63d vs 126d vs 252d + 混合策略）
-python momentum_period_backtest.py
+python research/momentum_period_backtest.py
 ```
 
 ### 獨立工具
