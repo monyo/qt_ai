@@ -7,6 +7,28 @@ TRANCHE_PARAMS = {
     "tight_3":  {"fixed": -0.07, "trailing": -0.10, "protect":  7},
 }
 
+# 波動率分層停損（回測驗證：_vol_stop_backtest.py + _vol_stop_sensitivity.py）
+# 中層 -16%/-24%：停損率 46% 但每次損失更淺（-12.5%），存活者品質更高（+24.7%）
+# Calmar 12.845 vs -22% 的 11.391；MDD -31.2% vs -38.3%
+VOL_TIER_LOW  = 0.35   # 年化波動率 < 35%：維持標準停損
+VOL_TIER_HIGH = 0.60   # 年化波動率 > 60%：使用最寬停損
+
+def vol_adjusted_stops(stop_type: str, vol: float | None) -> tuple[float, float]:
+    """
+    根據年化波動率調整 standard 批次的停損距離（回傳正值距離，如 0.16 = -16%）。
+    tight_2 / tight_3 批次為金字塔設計，不做調整。
+    """
+    if stop_type != "standard":
+        params = TRANCHE_PARAMS[stop_type]
+        return abs(params["fixed"]), abs(params["trailing"])
+
+    if vol is None or vol < VOL_TIER_LOW:
+        return 0.15, 0.25   # 低波動（<35%）：標準
+    elif vol < VOL_TIER_HIGH:
+        return 0.16, 0.24   # 中波動（35–60%）：緊停損作品質過濾
+    else:
+        return 0.25, 0.35   # 高波動（>60%）：寬停損避免雜訊
+
 # 動態收緊追蹤停損：獲利達 +25% 時，把追蹤停損從原始值收緊
 # 回測顯示：Calmar 0.516 → 0.620（+0.104），優於分批停利
 TIGHTEN_THRESHOLD = 0.25
@@ -171,7 +193,8 @@ def _vix_multiplier(vix: float) -> float:
 
 def check_all_exit_conditions(positions, current_prices, ma200_prices,
                                fixed_threshold=-0.15, hard_threshold=-0.35,
-                               trailing_pct=0.25, vix=20.0, volumes=None):
+                               trailing_pct=0.25, vix=20.0, volumes=None,
+                               vol_map=None):
     """逐批次檢查出場條件，回傳需要出場的持倉
 
     每個 tranche 按各自的 stop_type 套用差異停損參數：
@@ -214,6 +237,8 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
         low_vol   = vol_ma > 0 and vol < vol_ma * VOL_CONFIRM_RATIO
         vol_ratio = round(vol / vol_ma, 2) if vol_ma > 0 else None
 
+        sym_vol = (vol_map or {}).get(symbol)  # 年化波動率（可能為 None）
+
         for t in pos["tranches"]:
             stop_type = t.get("stop_type", "standard")
             params    = TRANCHE_PARAMS.get(stop_type, TRANCHE_PARAMS["standard"])
@@ -234,12 +259,14 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
             t_high      = t.get("high", entry_price)
             t_shares    = t["shares"]
 
+            # ── 波動率分層調整停損基礎距離（standard 批次限定）────────────
+            base_fixed_dist, base_trail_dist = vol_adjusted_stops(stop_type, sym_vol)
+
             # ── 計算有效停損位（含 VIX 展寬）────────────────────────────
-            raw_fixed_dist  = abs(params["fixed"])
-            eff_fixed_dist  = min(raw_fixed_dist * vix_mult, FIXED_WIDEN_MAX)
+            eff_fixed_dist  = min(base_fixed_dist * vix_mult, FIXED_WIDEN_MAX)
             fixed_stop_price = entry_price * (1 - eff_fixed_dist)
 
-            eff_trailing      = t.get("trailing_pct", abs(params["trailing"]))
+            eff_trailing      = t.get("trailing_pct", base_trail_dist)
             eff_trail_dist    = min(eff_trailing * vix_mult, VIX_WIDEN_MAX)
             trailing_stop_price = t_high * (1 - eff_trail_dist) if t_high > 0 else 0
 

@@ -105,8 +105,12 @@ Quantitative stock scanning + position management system. Combines technical ana
 
 - **Actions 狀態流**：`pending` → `confirmed`/`skipped`，HOLD 為 `auto`
 - **停損機制**（四層，依優先順序）：
-  - Fixed -15%：從成本價計算，跌破即出場
-  - 追蹤停損 -25%：從進場後最高點（`high_since_entry`）回落 -25% 出場，回測 Calmar 0.882
+  - **波動率分層停損**（`vol_adjusted_stops` in `risk.py`，回測驗證 `_vol_stop_sensitivity.py`）：
+    - 低波動（<35%）：固定 -15%、追蹤 -25%（標準）
+    - 中波動（35–60%）：固定 -16%、追蹤 -24%（緊停損作品質過濾，Calmar 12.845 vs -22%的 11.391）
+    - 高波動（>60%）：固定 -25%、追蹤 -35%（寬停損避免雜訊）
+    - Firstrade 掛單 = max(固定停損價, 追蹤停損價)，哪個高用哪個
+  - 追蹤停損：從進場後最高點（`high_since_entry`）計算，回測 Calmar 0.882
   - MA200 停損：跌破 200 日均線
   - 極端停損 -35%：最後防線
   - HOLD 欄位顯示距高接近度：🔴 > -20%、🟡 > -10%
@@ -122,13 +126,13 @@ Quantitative stock scanning + position management system. Combines technical ana
   - 持倉動能 > 0 且批次數 < 5 時，可建議加碼（ADD action 含 `is_pyramid=True`）
   - `portfolio.json` 每個持倉有 `tranches` 陣列，記錄每批進場價/日期/停損類型
   - 差異停損：第1批 -15%/-25%，第2批 -10%/-15%，第3批+ -7%/-10%（越晚越緊）
-  - 保護期（30/15/7 天）只阻擋 EXIT，不阻擋加碼 ADD
+  - 保護期（30/15/7 天）只阻擋**系統建議的 EXIT/ROTATE**，不阻擋加碼 ADD，也**不阻擋 Firstrade 手動停損單**
   - 回調後加碼（後批價格 < 前批）用標準停損，入場價本身是保護
   - **stop_type 校正**：`apply_confirmed_actions` 用實際成交價 vs 前批成本重算（而非盤前推薦當時的市價），確保「越貴的批次有越高的固定停損價」
 - **停損單更新提醒**（`_get_stop_update_reminders` in `premarket_main.py`）：
   - 每日盤前計算各持倉批次的追蹤停損價（高點 × trailing%）vs 固定停損價（成本 × fixed%）
   - 追蹤停損 > 固定停損時，在 HOLD 區段後顯示「📌 停損單需更新」，列出需調整的 Firstrade 掛單價格
-  - Firstrade 每個標的只能掛一張停損單：多批次時取最嚴格（最高）的停損價，全部股數一起掛
+  - Firstrade 每個標的只能掛一張停損單：**從最緊批次（批3）開始掛，只掛該批股數**；觸發後手動改掛批2，再改批1。批次越新、入場越貴 → 停損越緊 → 應越早觸發。保護期不影響停損單設置。
 - **今日待辦清單**：盤前報告末尾以框線顯示優先順序摘要
   - 🔴 EXIT（立即執行）→ 📌 停損單更新 → 🔄 ROTATE → 🟢 ADD
   - 設計目的：降低「看到建議但沒執行」的操作漏洞，EXIT 是策略紀律，當天必須執行

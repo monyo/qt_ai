@@ -14,7 +14,7 @@ MAX_PYRAMID = 5       # 最大批次數（同回測最佳參數）
 MAX_PYRAMID_SHOW = 3  # 每日最多顯示的金字塔加碼建議數
 
 
-def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None, trend_state_map=None, alpha_3y_map=None, market_regime="BULL", vix=20.0, volumes=None):
+def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_ranks=None, alpha_1y_map=None, trend_state_map=None, alpha_3y_map=None, market_regime="BULL", vix=20.0, volumes=None, vol_map=None):
     """盤前決策引擎（動能策略 + 三層出場 + 趨勢狀態 + 市場體制）
 
     Args:
@@ -57,6 +57,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         positions, current_prices, ma200_prices,
         fixed_threshold=-0.15, hard_threshold=-0.35,
         vix=vix or 20.0, volumes=volumes,
+        vol_map=vol_map,
     )
 
     # === 2. 遍歷所有持倉，產出 HOLD / EXIT ===

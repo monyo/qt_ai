@@ -137,19 +137,23 @@ def run_init():
     print(f"已儲存至 data/portfolio.json")
 
 
-def _get_stop_update_reminders(portfolio, current_prices):
-    """找出追蹤停損價 > 固定停損價的持倉批次，提醒更新 Firstrade 停損單。
+def _get_stop_update_reminders(portfolio, current_prices, vol_map=None):
+    """找出需要更新 Firstrade 停損單的持倉批次。
 
-    追蹤停損 = 批次最高點 × (1 - trailing_pct)
-    固定停損 = 批次成本價 × (1 - fixed_pct)
+    每個批次的有效停損 = max(固定停損, 追蹤停損)
+    - 固定停損 = 批次成本價 × (1 - fixed_pct)  [波動率分層調整]
+    - 追蹤停損 = 批次最高點 × (1 - trailing_pct)
 
-    當追蹤停損 > 固定停損，代表股票已漲幅足夠，
-    追蹤停損比固定停損更嚴格（更高），應把掛單價格調高。
+    觸發條件：標的中至少有一個批次的追蹤停損 > 固定停損。
+    多批次標的：觸發後輸出全部批次，從最緊（批N）到最寬（批1），
+    讓使用者知道 Firstrade 要依序掛哪個價格（越緊的越先觸發）。
 
     Returns:
-        list of dict: symbol, tranche_n, fixed_stop, trailing_stop, high_price, trailing_pct
+        list of dict: symbol, tranche_n, shares, entry_price, high_price,
+                      fixed_stop, trailing_stop, effective_stop,
+                      trailing_pct, tightened, use_fixed, vol_tier
     """
-    from src.risk import TRANCHE_PARAMS
+    from src.risk import TRANCHE_PARAMS, vol_adjusted_stops
     reminders = []
     positions = portfolio.get("positions", {})
 
@@ -157,38 +161,77 @@ def _get_stop_update_reminders(portfolio, current_prices):
         if pos.get("core"):
             continue
 
+        sym_vol = (vol_map or {}).get(symbol)
+
         tranches = pos.get("tranches", [])
         if not tranches:
             tranches = [{
                 "n": 1,
+                "shares": pos.get("shares", 0),
                 "entry_price": pos["avg_price"],
                 "high": pos.get("high_since_entry", pos["avg_price"]),
                 "stop_type": "standard",
             }]
 
         multi = len(tranches) > 1
-        for t in tranches:
-            params = TRANCHE_PARAMS.get(t.get("stop_type", "standard"), TRANCHE_PARAMS["standard"])
-            entry_price = t.get("entry_price", pos["avg_price"])
-            high_price  = t.get("high") or pos.get("high_since_entry") or entry_price
 
-            fixed_stop    = entry_price * (1 + params["fixed"])     # e.g. entry × 0.85
-            # 使用動態收緊後的 trailing_pct（若已收緊）
-            eff_trailing  = t.get("trailing_pct", abs(params["trailing"]))
-            trailing_stop = high_price * (1 - eff_trailing)
-            tightened     = "trailing_pct" in t  # 是否已動態收緊
+        # 計算每個批次的停損資訊
+        tranche_infos = []
+        any_trailing_above_fixed = False
+
+        for t in tranches:
+            stop_type    = t.get("stop_type", "standard")
+            params       = TRANCHE_PARAMS.get(stop_type, TRANCHE_PARAMS["standard"])
+            entry_price  = t.get("entry_price", pos["avg_price"])
+            high_price   = t.get("high") or pos.get("high_since_entry") or entry_price
+            tightened    = "trailing_pct" in t
+
+            # 波動率分層調整固定停損距離（standard 批次）
+            base_fixed_dist, base_trail_dist = vol_adjusted_stops(stop_type, sym_vol)
+            eff_trailing  = t.get("trailing_pct", base_trail_dist)
+
+            fixed_stop     = entry_price * (1 - base_fixed_dist)
+            trailing_stop  = high_price  * (1 - eff_trailing)
+            effective_stop = max(fixed_stop, trailing_stop)
+            use_fixed      = fixed_stop >= trailing_stop
+
+            # vol tier 標示
+            if sym_vol is None:
+                vol_tier = None
+            elif sym_vol < 0.35:
+                vol_tier = "低"
+            elif sym_vol < 0.60:
+                vol_tier = "中"
+            else:
+                vol_tier = "高"
 
             if trailing_stop > fixed_stop:
-                reminders.append({
-                    "symbol":       symbol,
-                    "tranche_n":    t["n"] if multi else None,
-                    "entry_price":  entry_price,
-                    "high_price":   high_price,
-                    "fixed_stop":   fixed_stop,
-                    "trailing_stop": trailing_stop,
-                    "trailing_pct": eff_trailing * 100,
-                    "tightened":    tightened,
-                })
+                any_trailing_above_fixed = True
+
+            tranche_infos.append({
+                "symbol":         symbol,
+                "tranche_n":      t["n"] if multi else None,
+                "shares":         t.get("shares", pos.get("shares", 0)),
+                "entry_price":    entry_price,
+                "high_price":     high_price,
+                "fixed_stop":     fixed_stop,
+                "trailing_stop":  trailing_stop,
+                "effective_stop": effective_stop,
+                "trailing_pct":   eff_trailing * 100,
+                "tightened":      tightened,
+                "use_fixed":      use_fixed,
+                "vol_tier":       vol_tier,
+                "vol":            sym_vol,
+            })
+
+        if not any_trailing_above_fixed:
+            continue  # 此標的無任何批次需要更新
+
+        # 多批次：從最緊（批N）到最寬（批1）排序輸出
+        if multi:
+            tranche_infos = sorted(tranche_infos, key=lambda x: -(x["tranche_n"] or 0))
+
+        reminders.extend(tranche_infos)
 
     return reminders
 
@@ -374,9 +417,34 @@ def run_premarket(scan_tw=False):
     # 4.95 市場廣度（使用波浪掃描快取，不需額外下載）
     breadth_status = get_breadth_status()
 
+    # 4.96 計算持倉年化波動率（供波動率分層停損使用）
+    vol_map = {}
+    try:
+        import yfinance as yf
+        import numpy as np
+        if held_symbols:
+            _hist = yf.download(held_symbols, period="90d", auto_adjust=True, progress=False)["Close"]
+            if hasattr(_hist, "columns"):
+                for _sym in held_symbols:
+                    if _sym not in _hist.columns:
+                        continue
+                    _px = _hist[_sym].dropna()
+                    if len(_px) >= 20:
+                        _lr = np.log(_px / _px.shift(1)).dropna()
+                        if len(_lr) >= 15:
+                            vol_map[_sym] = float(_lr.std() * np.sqrt(252))
+            elif len(held_symbols) == 1:
+                _px = _hist.dropna()
+                if len(_px) >= 20:
+                    _lr = np.log(_px / _px.shift(1)).dropna()
+                    if len(_lr) >= 15:
+                        vol_map[held_symbols[0]] = float(_lr.std() * np.sqrt(252))
+    except Exception:
+        pass
+
     # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態 + 市場體制）
     actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map, market_regime=regime["regime"],
-                               vix=market_env.get("vix_level", 20.0), volumes=held_volumes)
+                               vix=market_env.get("vix_level", 20.0), volumes=held_volumes, vol_map=vol_map)
 
     # 5.1 儲存 pending 停損狀態（stop_pending_since 已寫入 portfolio tranches）
     has_pending = any(a.get("stop_pending") for a in actions if a["action"] == "HOLD")
@@ -663,16 +731,20 @@ def run_premarket(scan_tw=False):
                     print(f"         {prefix} 批{t['n']}({stop_label}) {t['shares']:>3}股 @${t['entry_price']:.0f}  P&L:{t_pnl_str:>7}  {protect_str}{tight_mark}")
         print()
 
-    # 停損單更新提醒（追蹤停損 > 固定停損時，需調高 Firstrade 掛單）
-    stop_reminders = _get_stop_update_reminders(portfolio, current_prices)
+    # 停損單更新提醒（多批次從最緊到最寬排序，Firstrade 依序掛單）
+    stop_reminders = _get_stop_update_reminders(portfolio, current_prices, vol_map=vol_map)
     if stop_reminders:
-        print("--- 📌 停損單需更新（追蹤停損 > 固定停損）---")
+        print("--- 📌 停損單需更新（Firstrade 依序掛，最緊批次先）---")
         for r in stop_reminders:
-            batch_str = f" 第{r['tranche_n']}批" if r["tranche_n"] is not None else ""
+            batch_str  = f" 第{r['tranche_n']}批" if r["tranche_n"] is not None else ""
             tight_mark = " 🔒收緊" if r.get("tightened") else ""
-            print(f"  {r['symbol']:<6}{batch_str:<5}  "
-                  f"原掛 ${r['fixed_stop']:>7.2f}  →  改掛 ${r['trailing_stop']:>7.2f}"
-                  f"  （高點 ${r['high_price']:.2f} 追蹤{r['trailing_pct']:.0f}%{tight_mark}）")
+            if r.get("use_fixed"):
+                reason = f"固定 -{100 - r['fixed_stop'] / r['entry_price'] * 100:.0f}% from ${r['entry_price']:.2f}"
+            else:
+                reason = f"高點 ${r['high_price']:.2f} 追蹤{r['trailing_pct']:.0f}%{tight_mark}"
+            shares_str = f"{r['shares']}股" if r["tranche_n"] is not None else ""
+            print(f"  {r['symbol']:<6}{batch_str:<5}  {shares_str:<5}"
+                  f"→ 改掛 ${r['effective_stop']:>8.2f}  （{reason}）")
         print()
 
     if new_adds or pyramid_adds or backup_adds:
@@ -836,7 +908,7 @@ def run_premarket(scan_tw=False):
     exit_actions   = [a for a in actions if a["action"] == "EXIT"]
     add_actions    = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
     rotate_actions = [a for a in actions if a["action"] == "ROTATE"]
-    stop_reminders = _get_stop_update_reminders(portfolio, current_prices)
+    stop_reminders = _get_stop_update_reminders(portfolio, current_prices, vol_map=vol_map)
 
     has_todo = exit_actions or stop_reminders or add_actions or rotate_actions
     if has_todo:
@@ -855,10 +927,11 @@ def run_premarket(scan_tw=False):
         if stop_reminders:
             if exit_actions:
                 print("╠" + "─" * width + "╣")
-            print(f"║  {'📌 停損單需更新（Firstrade 調整掛單）':<{width-2}}║")
+            print(f"║  {'📌 停損單需更新（最緊批次先掛）':<{width-2}}║")
             for r in stop_reminders:
-                batch_str = f" 第{r['tranche_n']}批" if r["tranche_n"] is not None else ""
-                line = f"     {r['symbol']}{batch_str}  → 改掛 ${r['trailing_stop']:.2f}"
+                batch_str  = f" 第{r['tranche_n']}批" if r["tranche_n"] is not None else ""
+                shares_str = f" {r['shares']}股" if r["tranche_n"] is not None else ""
+                line = f"     {r['symbol']}{batch_str}{shares_str}  → 改掛 ${r['effective_stop']:.2f}"
                 print(f"║  {line:<{width-2}}║")
 
         if rotate_actions:
