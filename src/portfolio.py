@@ -70,6 +70,7 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
             if shares <= 0:
                 continue
 
+            stop_type = "standard"
             if symbol in portfolio["positions"]:
                 pos = portfolio["positions"][symbol]
                 # 先確保 tranches 存在（使用更新前的 avg_price 做 lazy migrate）
