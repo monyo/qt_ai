@@ -204,11 +204,21 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
             if buy_shares > 0:
                 if buy_sym in portfolio["positions"]:
                     pos = portfolio["positions"][buy_sym]
+                    _ensure_tranches(pos)
+                    n_next = max((t["n"] for t in pos["tranches"]), default=0) + 1
                     pos["avg_price"] = calc_avg_price(
                         pos["avg_price"], pos["shares"], buy_price, buy_shares
                     )
                     pos["shares"] += buy_shares
                     pos["cost_basis"] = pos["avg_price"] * pos["shares"]
+                    pos["tranches"].append({
+                        "n": n_next,
+                        "shares": buy_shares,
+                        "entry_price": buy_price,
+                        "entry_date": tx_date,
+                        "high": buy_price,
+                        "stop_type": "standard",
+                    })
                 else:
                     portfolio["positions"][buy_sym] = {
                         "shares": buy_shares,
@@ -217,6 +227,14 @@ def apply_confirmed_actions(portfolio, confirmed_actions):
                         "first_entry": tx_date,
                         "high_since_entry": buy_price,
                         "core": False,
+                        "tranches": [{
+                            "n": 1,
+                            "shares": buy_shares,
+                            "entry_price": buy_price,
+                            "entry_date": tx_date,
+                            "high": buy_price,
+                            "stop_type": "standard",
+                        }],
                     }
                 portfolio["cash"] -= buy_price * buy_shares
                 portfolio["transactions"].append({
