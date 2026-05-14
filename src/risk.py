@@ -331,12 +331,12 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
             }
 
             pending_since = t.get("stop_pending_since")
-            if pending_since:
-                # 第二日確認 → 真正出場
+            if pending_since and pending_since < today_str:
+                # 第二日確認（非同日重跑）→ 真正出場
                 t.pop("stop_pending_since", None)
                 sym_exits.append(item)
             else:
-                # 第一日 → 設待確認（兩日確認 + 成交量雙重保護）
+                # 第一日（或同日重跑）→ 設待確認
                 t["stop_pending_since"] = today_str
                 notice = dict(item)
                 notice["pending_reason"] = "low_volume" if low_vol else "two_day_confirm"
