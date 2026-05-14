@@ -105,8 +105,10 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             })
         elif symbol in exit_signals:
             # 逐批出場：為每個觸發批次建立 EXIT action
+            exit_tranche_ns = set()
             for exit_item in exit_signals[symbol]:
                 action_id += 1
+                exit_tranche_ns.add(exit_item["tranche_n"])
                 actions.append({
                     "id": action_id,
                     "action": "EXIT",
@@ -123,6 +125,29 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                     "reason": exit_item["message"],
                     "source": exit_item["reason"],
                     "status": "pending",
+                })
+            # 若還有其他批次未觸發停損，補一個 HOLD 讓 PDF 正確顯示剩餘批次
+            _ensure_tranches(pos)
+            remaining = [t for t in pos["tranches"] if t["n"] not in exit_tranche_ns]
+            if remaining:
+                action_id += 1
+                actions.append({
+                    "id": action_id,
+                    "action": "HOLD",
+                    "symbol": symbol,
+                    "shares": sum(t["shares"] for t in remaining),
+                    "current_price": price,
+                    "avg_price": pos["avg_price"],
+                    "high_since_entry": high_price,
+                    "pnl_pct": pnl_pct,
+                    "momentum": momentum,
+                    "momentum_rank": rank,
+                    "alpha_1y": alpha_1y,
+                    "trend_state": trend_state,
+                    "reason": f"持有中（其餘 {len(remaining)} 批未觸停損）",
+                    "source": "momentum",
+                    "status": "auto",
+                    "tranches": remaining,
                 })
         else:
             # 繼續持有（讓獲利奔跑）
