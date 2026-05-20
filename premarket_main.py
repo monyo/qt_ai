@@ -317,6 +317,243 @@ def _check_triple_warning(breadth_status, market_env, actions):
     }
 
 
+TW_SLOTS      = 5       # 台股持倉上限（槽數）
+TW_FIXED_STOP = 0.15    # 固定停損 -15%
+TW_TRAIL_STOP = 0.25    # 追蹤停損 -25%
+TW_CACHE      = "data/_tw_bt_prices.pkl"
+
+
+TW_MKTCAP_PATH = "data/_tw_mktcap.pkl"
+TW_MKTCAP_MIN  = 500  # 億台幣，回測驗證：>500億中位報酬 +2.4% vs 無門檻
+
+
+def _tw_momentum_from_cache(exclude_syms=None):
+    """從快取計算台股動能排名，回傳 [{symbol, name, momentum, trend_state, price}]"""
+    import json as _json
+    import pickle as _pickle
+    if not os.path.exists(TW_CACHE):
+        return []
+    prices = pd.read_pickle(TW_CACHE)
+    prices.index = pd.to_datetime(prices.index).tz_localize(None)
+
+    with open("data/tw_liquid_stocks.json") as f:
+        tw_data = _json.load(f)
+    name_map = {s["symbol"]: s["name"] for s in tw_data["stocks"]}
+    exclude = set(exclude_syms or [])
+
+    # 市值快取（每週更新一次）
+    mktcap_map = {}
+    if os.path.exists(TW_MKTCAP_PATH):
+        with open(TW_MKTCAP_PATH, "rb") as f:
+            mktcap_map = _pickle.load(f)
+
+    results = []
+    for sym in prices.columns:
+        if sym in exclude:
+            continue
+        # Filter 3：市值門檻（回測驗證：>500億中位報酬 +2.4%）
+        if mktcap_map.get(sym, 0) < TW_MKTCAP_MIN:
+            continue
+        s = prices[sym].dropna()
+        if len(s) < 260:
+            continue
+        p0   = float(s.iloc[-1])
+        p21  = float(s.iloc[-22])
+        p252 = float(s.iloc[-253]) if len(s) > 253 else None
+        p63  = float(s.iloc[-64])  if len(s) > 64  else None
+        if not (p21 and p252 and p21 > 0 and p252 > 0):
+            continue
+        mom = 0.5 * (p0/p21 - 1) * 100 + 0.5 * (p0/p252 - 1) * 100
+        # 風險過濾（回測驗證：排除後中位報酬 +0.73%）
+        # Filter 1：5日急漲 >40%（炒作特徵，如聯致 70→190）
+        ret5 = (p0 / float(s.iloc[-6]) - 1) if len(s) > 6 else 0
+        if ret5 > 0.40:
+            continue
+        # Filter 2：連續漲停 ≥ 2 天（追漲停陷阱）
+        daily_rets = s.iloc[-7:].pct_change().dropna().values
+        consec_up = 0
+        for dr in reversed(daily_rets):
+            if dr >= 0.095:
+                consec_up += 1
+            else:
+                break
+        if consec_up >= 2:
+            continue
+        # 趨勢狀態
+        h40 = float(s.iloc[-40:].max())
+        l40 = float(s.iloc[-40:].min())
+        bounce  = (p0/l40 - 1) * 100
+        from_h  = (p0/h40 - 1) * 100
+        if bounce > 20 and from_h > -5:
+            state = "↗️轉強"
+        elif from_h < -15:
+            state = "↘️轉弱"
+        else:
+            state = "→盤整"
+        results.append({
+            "symbol": sym, "name": name_map.get(sym, ""),
+            "momentum": round(mom, 1), "price": round(p0, 1),
+            "trend_state": state, "from_high_pct": round(from_h, 1),
+        })
+
+    results.sort(key=lambda x: x["momentum"], reverse=True)
+    for i, r in enumerate(results, 1):
+        r["rank"] = i
+    return results
+
+
+def _run_tw_section(portfolio, actions_output):
+    """台股持倉管理：HOLD/EXIT/ADD，寫入 actions_output['tw_actions']"""
+    tw_positions = portfolio.get("tw_positions", {})
+    tw_cash      = portfolio.get("tw_cash", 0.0)
+
+    # ── 取得持倉現價 ──
+    tw_syms = list(tw_positions.keys())
+    tw_prices = {}
+    if tw_syms:
+        try:
+            raw = yf.download(tw_syms, period="3d", auto_adjust=True, progress=False)
+            close = raw["Close"] if "Close" in raw else raw
+            if isinstance(close, pd.Series):
+                close = close.to_frame(name=tw_syms[0])
+            for sym in tw_syms:
+                if sym in close.columns:
+                    s = close[sym].dropna()
+                    if not s.empty:
+                        tw_prices[sym] = float(s.iloc[-1])
+        except Exception:
+            pass
+
+    # ── 計算台股持倉總值 ──
+    tw_pos_value = sum(
+        tw_prices.get(sym, pos["avg_price"]) * pos["shares"]
+        for sym, pos in tw_positions.items()
+    )
+    tw_total = tw_cash + tw_pos_value
+
+    print()
+    print("─" * 60)
+    print(f"  🇹🇼 台股部位")
+    print(f"  現金: NT${tw_cash:>10,.0f}  持倉: NT${tw_pos_value:>10,.0f}  合計: NT${tw_total:>10,.0f}")
+    print(f"  持倉: {len(tw_positions)}/{TW_SLOTS} 槽")
+    print("─" * 60)
+
+    today_str = date.today().isoformat()
+    tw_actions = []
+
+    # ── HOLD / EXIT 檢查 ──
+    exit_syms = []
+    hold_lines = []
+
+    for sym, pos in tw_positions.items():
+        px = tw_prices.get(sym, pos["avg_price"])
+        shares     = pos["shares"]
+        avg_price  = pos["avg_price"]
+        high       = pos.get("high_since_entry", avg_price)
+        first_entry = pos.get("first_entry", today_str)
+        holding_days = (date.today() - date.fromisoformat(first_entry)).days
+
+        # 更新高點
+        if px > high:
+            high = px
+            portfolio["tw_positions"][sym]["high_since_entry"] = round(px, 2)
+
+        pnl_pct = (px - avg_price) / avg_price * 100
+        fixed_px = avg_price * (1 - TW_FIXED_STOP)
+        trail_px = high * (1 - TW_TRAIL_STOP)
+        stop_px  = max(fixed_px, trail_px)
+        from_high_pct = (px - high) / high * 100
+
+        if px < stop_px:
+            reason = f"固定停損 -15%" if fixed_px >= trail_px else f"追蹤停損 -25%"
+            exit_syms.append(sym)
+            tw_actions.append({
+                "action": "TW_EXIT", "symbol": sym, "shares": shares,
+                "current_price": px, "avg_price": avg_price,
+                "pnl_pct": round(pnl_pct, 2), "reason": reason,
+                "stop_price": round(stop_px, 2), "status": "pending",
+            })
+            print(f"  🔴 EXIT  {sym}  {shares}股 @ NT${px:.0f}  P&L: {pnl_pct:+.1f}%  {reason}")
+        else:
+            # 停損單提醒
+            stop_flag = ""
+            if from_high_pct < -20:
+                stop_flag = "  🔴追蹤-{:.0f}%".format(abs(from_high_pct))
+            elif from_high_pct < -10:
+                stop_flag = "  🟡追蹤{:.0f}%".format(from_high_pct)
+
+            hold_lines.append(
+                f"  HOLD  {sym:<10}  {shares}股 @ NT${avg_price:.0f}"
+                f"  P&L: {pnl_pct:+.1f}%  停損: NT${stop_px:.0f}{stop_flag}"
+                f"  ({holding_days}天)"
+            )
+
+    if not tw_positions:
+        print("  （尚無台股持倉）")
+    else:
+        for line in hold_lines:
+            print(line)
+
+    # ── ADD 建議（動能前 TW_SLOTS，排除持倉）──
+    occupied = len(tw_positions) - len(exit_syms)
+    open_slots = TW_SLOTS - occupied
+    print()
+
+    mom_ranks = _tw_momentum_from_cache(exclude_syms=list(tw_positions.keys()))
+    # 只取轉強或動能 >10% 的標的
+    candidates = [r for r in mom_ranks if r["momentum"] > 10][:TW_SLOTS * 3]
+
+    if open_slots > 0 and candidates:
+        per_slot_ntd = tw_cash / open_slots if open_slots > 0 else 0
+        print(f"  --- ADD 建議（{open_slots} 個空槽，每槽約 NT${per_slot_ntd:,.0f}）---")
+        shown = 0
+        for r in candidates:
+            if shown >= open_slots:
+                print(f"  [備選 #{r['rank']}]  {r['symbol']:<10} {r['name']:<8} "
+                      f"動能: {r['momentum']:+.1f}%  {r['trend_state']}  NT${r['price']:.1f}")
+                continue
+            suggested_shares = int(per_slot_ntd / r["price"]) if r["price"] > 0 else 0
+            print(f"  [#{r['rank']}]  {r['symbol']:<10} {r['name']:<8} "
+                  f"建議 {suggested_shares} 股 @ NT${r['price']:.1f}"
+                  f"  動能: {r['momentum']:+.1f}%  {r['trend_state']}")
+            tw_actions.append({
+                "action": "TW_ADD", "symbol": r["symbol"], "name": r["name"],
+                "current_price": r["price"], "suggested_shares": suggested_shares,
+                "momentum": r["momentum"], "trend_state": r["trend_state"],
+                "rank": r["rank"], "status": "pending",
+            })
+            shown += 1
+    elif open_slots == 0:
+        print("  台股持倉已滿（5 槽），無新增建議")
+    else:
+        print("  ⚠ 無符合條件的台股候補（需先更新 data/_tw_bt_prices.pkl）")
+
+    # ── 停損單提醒 ──
+    stop_updates = []
+    for sym, pos in tw_positions.items():
+        if sym in exit_syms:
+            continue
+        px     = tw_prices.get(sym, pos["avg_price"])
+        high   = pos.get("high_since_entry", pos["avg_price"])
+        trail_px = round(high * (1 - TW_TRAIL_STOP), 0)
+        fixed_px = round(pos["avg_price"] * (1 - TW_FIXED_STOP), 0)
+        eff    = max(trail_px, fixed_px)
+        stop_updates.append((sym, eff, high))
+
+    if stop_updates:
+        print()
+        print("  📌 台股停損單（Firstrade 無法掛，請在台灣券商設定）")
+        for sym, stop, high in stop_updates:
+            print(f"     {sym}  停損: NT${stop:.0f}  （高點 NT${high:.0f}）")
+
+    # ── 寫入 actions_output ──
+    actions_output["tw_actions"] = tw_actions
+    actions_output["tw_cash"] = tw_cash
+    actions_output["tw_total"] = tw_total
+
+    return tw_actions
+
+
 def run_premarket(scan_tw=False):
     """產出盤前建議（動能策略 + 三層出場）
 
@@ -512,6 +749,7 @@ def run_premarket(scan_tw=False):
             "cash": portfolio.get("cash", 0),
             "individual_count": individual,
             "yearly_pnl": yearly_pnl,
+            "tw_positions": portfolio.get("tw_positions", {}),
         },
         "regime_status": regime,
         "sector_status": {
@@ -846,6 +1084,12 @@ def run_premarket(scan_tw=False):
             print(f"  → 買 {a['buy_symbol']}{buy_sector_tag}  {a['buy_shares']} 股 (動能: +{a['buy_momentum']:.1f}%, {alpha_str})")
             print(f"       動能差: +{a['momentum_diff']:.0f}%  {a['reason']}")
             print()
+
+    # === 台股持倉管理（每次自動執行）===
+    tw_actions = _run_tw_section(portfolio, actions_output)
+    # 補存（含台股資料）
+    with open(actions_path, "w", encoding="utf-8") as f:
+        json.dump(actions_output, f, indent=2, ensure_ascii=False)
 
     # === 台股觀察（全市場掃描，需加 --tw 開啟）===
     if scan_tw:

@@ -318,10 +318,10 @@ def calculate_alpha_3y_batch(symbols: list, benchmark: str = "SPY", max_workers:
 
 
 def calculate_trend_state(symbol: str) -> dict | None:
-    """計算單一標的的趨勢狀態（40日低點反彈% + 距40日高點%）
+    """計算單一標的的趨勢狀態（20日低點反彈% + 距20日高點%）
 
-    回測驗證：轉強組未來21日平均報酬 +2.86%（勝率58%），
-    轉弱組僅 +0.72%（勝率52%），月差 +2.14%。
+    回測驗證：bounce=25%/window=20天 gap +1.06% vs 非轉強（2026-04）
+    from_high 門檻 -15%（2026-04 更新，舊值 -5%）
 
     Args:
         symbol: 股票代碼
@@ -332,21 +332,21 @@ def calculate_trend_state(symbol: str) -> dict | None:
     """
     try:
         df = yf.Ticker(symbol).history(period="3mo")
-        if df.empty or len(df) < 40:
+        if df.empty or len(df) < 20:
             return None
 
-        closes_40d = df['Close'].iloc[-40:]
-        current = closes_40d.iloc[-1]
-        low_40d = closes_40d.min()
-        high_40d = closes_40d.max()
+        closes_20d = df['Close'].iloc[-20:]
+        current = closes_20d.iloc[-1]
+        low_20d = closes_20d.min()
+        high_20d = closes_20d.max()
 
-        if low_40d == 0 or high_40d == 0:
+        if low_20d == 0 or high_20d == 0:
             return None
 
-        bounce_pct = (current / low_40d - 1) * 100
-        from_high_pct = (current / high_40d - 1) * 100
+        bounce_pct = (current / low_20d - 1) * 100
+        from_high_pct = (current / high_20d - 1) * 100
 
-        if bounce_pct > 20 and from_high_pct > -5:
+        if bounce_pct > 25 and from_high_pct > -15:
             state = "轉強"
         elif from_high_pct < -15:
             state = "轉弱"

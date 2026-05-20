@@ -131,6 +131,8 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             remaining = [t for t in pos["tranches"] if t["n"] not in exit_tranche_ns]
             if remaining:
                 action_id += 1
+                # 同一標的的 pending_stops 也要帶過來，確保 stop_pending_since 能被存檔
+                remaining_pending = pending_stops.get(symbol)
                 actions.append({
                     "id": action_id,
                     "action": "HOLD",
@@ -148,6 +150,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                     "source": "momentum",
                     "status": "auto",
                     "tranches": remaining,
+                    "stop_pending": remaining_pending,
                 })
         else:
             # 繼續持有（讓獲利奔跑）

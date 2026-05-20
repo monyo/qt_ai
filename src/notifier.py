@@ -215,6 +215,31 @@ class GmailNotifier:
 
         hold_html = f'<p style="margin:10px 0;font-size:12px;color:#6c757d;">✅ HOLD: {len(holds)} 檔（詳見附件 PDF）</p>'
 
+        # 台股部位摘要
+        tw_section_html = ""
+        tw_actions_list = data.get("tw_actions", [])
+        tw_cash = data.get("tw_cash")
+        tw_total = data.get("tw_total")
+        if tw_cash is not None or tw_actions_list:
+            tw_exits = [a for a in tw_actions_list if a["action"] == "TW_EXIT"]
+            tw_adds  = [a for a in tw_actions_list if a["action"] == "TW_ADD" and a.get("status") == "pending"]
+            cash_str  = f"NT${tw_cash:,.0f}" if tw_cash is not None else "—"
+            total_str = f"NT${tw_total:,.0f}" if tw_total is not None else "—"
+            tw_rows = ""
+            for a in tw_adds[:5]:
+                tw_rows += (f'<tr><td style="padding:3px 8px;font-weight:bold;">{a["symbol"]}</td>'
+                            f'<td style="padding:3px 8px;">{a.get("name","")}</td>'
+                            f'<td style="padding:3px 8px;color:#28a745;">{a["momentum"]:+.1f}%</td>'
+                            f'<td style="padding:3px 8px;">{a.get("trend_state","")}</td>'
+                            f'<td style="padding:3px 8px;">{a.get("suggested_shares",0)} 股 @ NT${a["current_price"]:.0f}</td></tr>')
+            exit_str = f'  <span style="color:#dc3545;">⛔ EXIT {len(tw_exits)} 筆</span>' if tw_exits else ""
+            tw_section_html = (
+                f'<div style="background:#f0f7ff;padding:10px 14px;border-radius:6px;margin:12px 0;border-left:4px solid #0d6efd;">'
+                f'<strong>🇹🇼 台股部位</strong> &nbsp; 現金 {cash_str} &nbsp;|&nbsp; 合計 {total_str}{exit_str}'
+                + (f'<table style="border-collapse:collapse;width:100%;font-size:12px;margin-top:6px;"><tr style="background:#dce9ff;"><th style="padding:3px 8px;text-align:left;">代碼</th><th style="text-align:left;">名稱</th><th>動能</th><th style="text-align:left;">趨勢</th><th style="text-align:left;">建議</th></tr>{tw_rows}</table>' if tw_rows else '<p style="margin:4px 0;font-size:12px;color:#6c757d;">（尚無持倉，ADD 建議詳見 PDF）</p>')
+                + '</div>'
+            )
+
         return f'''<html>
 <body style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;padding:20px;color:#333;">
   <h2 style="margin-bottom:4px;">盤前報告 {data["date"]}</h2>
@@ -233,6 +258,7 @@ class GmailNotifier:
   {rotate_html}
   {add_html}
   {hold_html}
+  {tw_section_html}
 
   <p style="color:#aaa;font-size:11px;margin-top:20px;">📎 完整持倉表、建議詳情請見附件 PDF</p>
   <hr style="border:none;border-top:1px solid #eee;margin:12px 0;">
@@ -434,7 +460,28 @@ class GmailNotifier:
             lines.extend(watch_lines)
             lines.append("")
 
-        # 台股觀察
+        # 台股部位（新格式）
+        tw_actions_list = data.get("tw_actions", [])
+        tw_cash_val  = data.get("tw_cash")
+        tw_total_val = data.get("tw_total")
+        if tw_cash_val is not None or tw_actions_list:
+            tw_exits = [a for a in tw_actions_list if a["action"] == "TW_EXIT"]
+            tw_adds  = [a for a in tw_actions_list if a["action"] == "TW_ADD"]
+            cash_ntd  = tw_cash_val or 0
+            total_ntd = tw_total_val or 0
+            lines.append(f"🇹🇼 台股部位:")
+            lines.append(f"  現金: NT${cash_ntd:,.0f}  合計: NT${total_ntd:,.0f}")
+            if tw_exits:
+                lines.append(f"  EXIT ({len(tw_exits)} 筆):")
+                for a in tw_exits:
+                    lines.append(f"    ⛔ {a['symbol']}  {a.get('shares',0)}股  P&L: {a.get('pnl_pct',0):+.1f}%  {a.get('reason','')}")
+            if tw_adds:
+                lines.append(f"  ADD 建議 ({len(tw_adds)} 支):")
+                for a in tw_adds:
+                    lines.append(f"    #{a.get('rank','?')} {a['symbol']} {a.get('name','')}  {a.get('suggested_shares',0)}股 @ NT${a.get('current_price',0):.0f}  動能: {a.get('momentum',0):+.1f}%  {a.get('trend_state','')}")
+            lines.append("")
+
+        # 台股觀察（舊格式）
         tw_stocks = data.get("tw_stocks", {})
         if tw_stocks:
             scan_count = tw_stocks.get("scan_count", 0)
@@ -909,7 +956,65 @@ class GmailNotifier:
             items_str = "".join(watch_items)
             watch_html = f'<div style="background:#f8d7da;padding:12px;border-radius:5px;margin:10px 0;"><strong>需注意</strong><ul style="margin:5px 0;">{items_str}</ul></div>'
 
-        # 台股觀察
+        # 台股部位（新格式：tw_actions）
+        tw_actions_list = data.get("tw_actions", [])
+        tw_cash_val  = data.get("tw_cash")
+        tw_total_val = data.get("tw_total")
+        tw_positions_snap = (data.get("portfolio_snapshot") or {}).get("tw_positions", {})
+        tw_portfolio_html = ""
+        if tw_cash_val is not None or tw_actions_list:
+            tw_exits = [a for a in tw_actions_list if a["action"] == "TW_EXIT"]
+            tw_adds  = [a for a in tw_actions_list if a["action"] == "TW_ADD"]
+            cash_ntd  = tw_cash_val or 0
+            total_ntd = tw_total_val or 0
+            pos_ntd   = total_ntd - cash_ntd
+
+            # 持倉列
+            hold_rows = ""
+            for sym, pos in tw_positions_snap.items():
+                if sym in [a["symbol"] for a in tw_exits]:
+                    continue
+                hold_rows += (f'<tr><td style="padding:5px 8px;font-weight:bold;">{sym}</td>'
+                              f'<td style="padding:5px 8px;">{pos.get("shares",0)} 股</td>'
+                              f'<td style="padding:5px 8px;">NT${pos.get("avg_price",0):.0f}</td>'
+                              f'<td style="padding:5px 8px;color:#6c757d;">HOLD</td></tr>')
+            for a in tw_exits:
+                pnl_color = "#28a745" if a.get("pnl_pct", 0) >= 0 else "#dc3545"
+                hold_rows += (f'<tr style="background:#fdf2f2;"><td style="padding:5px 8px;font-weight:bold;">{a["symbol"]}</td>'
+                              f'<td style="padding:5px 8px;">{a.get("shares",0)} 股</td>'
+                              f'<td style="padding:5px 8px;">NT${a.get("avg_price",0):.0f}</td>'
+                              f'<td style="padding:5px 8px;color:{pnl_color};">⛔ EXIT {a.get("pnl_pct",0):+.1f}% — {a.get("reason","")}</td></tr>')
+
+            # ADD 建議列
+            add_rows = ""
+            for a in tw_adds:
+                m_color = "#28a745" if a.get("momentum", 0) > 0 else "#dc3545"
+                add_rows += (f'<tr><td style="padding:5px 8px;font-weight:bold;">#{a.get("rank","?")}</td>'
+                             f'<td style="padding:5px 8px;">{a["symbol"]}</td>'
+                             f'<td style="padding:5px 8px;">{a.get("name","")}</td>'
+                             f'<td style="padding:5px 8px;color:{m_color};">{a.get("momentum",0):+.1f}%</td>'
+                             f'<td style="padding:5px 8px;">{a.get("trend_state","")}</td>'
+                             f'<td style="padding:5px 8px;">{a.get("suggested_shares",0)} 股</td>'
+                             f'<td style="padding:5px 8px;">NT${a.get("current_price",0):.0f}</td></tr>')
+
+            hold_table = (f'<table style="border-collapse:collapse;width:100%;font-size:12px;margin-bottom:8px;">'
+                          f'<tr style="background:#dce9ff;"><th style="padding:5px 8px;text-align:left;">標的</th><th>股數</th><th>成本</th><th style="text-align:left;">狀態</th></tr>'
+                          f'{hold_rows}</table>') if hold_rows else '<p style="font-size:12px;color:#6c757d;margin:4px 0;">（尚無持倉）</p>'
+
+            add_table = (f'<h4 style="margin:10px 0 4px;font-size:12px;">➕ ADD 建議（{len(tw_adds)} 支）</h4>'
+                         f'<table style="border-collapse:collapse;width:100%;font-size:12px;">'
+                         f'<tr style="background:#dce9ff;"><th style="padding:5px 8px;">排名</th><th style="text-align:left;">代碼</th><th style="text-align:left;">名稱</th><th>動能</th><th style="text-align:left;">趨勢</th><th>建議股數</th><th>現價</th></tr>'
+                         f'{add_rows}</table>') if add_rows else ''
+
+            tw_portfolio_html = (
+                f'<div class="section-block" style="margin-top:20px;">'
+                f'<h3 style="color:#0d6efd;">🇹🇼 台股部位</h3>'
+                f'<p style="margin:4px 0;font-size:12px;">現金 NT${cash_ntd:,.0f} &nbsp;|&nbsp; 持倉 NT${pos_ntd:,.0f} &nbsp;|&nbsp; 合計 NT${total_ntd:,.0f}</p>'
+                f'{hold_table}{add_table}'
+                f'</div>'
+            )
+
+        # 台股觀察（舊格式：tw_stocks，掃描器輸出）
         tw_stocks = data.get("tw_stocks", {})
         tw_stocks_html = ""
         if tw_stocks:
@@ -963,6 +1068,7 @@ class GmailNotifier:
             {adds_html}
             {rotates_html}
             {topups_html}
+            {tw_portfolio_html}
             {tw_stocks_html}
 
             <hr style="margin:30px 0;border:none;border-top:1px solid #ddd;">
