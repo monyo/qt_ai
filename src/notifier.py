@@ -857,6 +857,15 @@ class GmailNotifier:
                     shap_parts = [f"{arrow}{label}" for label, sv, arrow in shap_top]
                     shap_str = f'<br><span style="font-size:10px;color:#6c757d;">{" | ".join(shap_parts)}</span>'
 
+                ts = a.get("trend_state") or {}
+                ts_state = ts.get("state", "")
+                if ts_state == "轉強":
+                    trend_td = '<td style="text-align:center;color:#28a745;">↗️轉強</td>'
+                elif ts_state == "轉弱":
+                    trend_td = '<td style="text-align:center;color:#dc3545;">↘️轉弱</td>'
+                else:
+                    trend_td = '<td style="text-align:center;color:#6c757d;">→</td>'
+
                 if a.get("is_pyramid"):
                     direction_arrow = "↑" if a.get("direction") == "up" else "↓"
                     tranche_label = f'<span style="color:#0d6efd;">{direction_arrow}第{a["tranche_n"]}批</span>'
@@ -864,13 +873,13 @@ class GmailNotifier:
                     post_rotate = a.get("suggested_shares_post_rotate")
                     if post_rotate is not None and post_rotate != a.get("suggested_shares", 0):
                         shares_str += f'<br><span style="color:#fd7e14;font-size:11px;">ROTATE後 {post_rotate} 股</span>'
-                    rows += f'<tr style="background:#e8f4ff;"><td>#{rank}</td><td><strong>{a["symbol"]}</strong> {tranche_label}{shap_str}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}{ml_td}</tr>'
+                    rows += f'<tr style="background:#e8f4ff;"><td>#{rank}</td><td><strong>{a["symbol"]}</strong> {tranche_label}{shap_str}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{trend_td}{rsi_html}{alpha_html}{ml_td}</tr>'
                 else:
                     shares_str = str(a.get("suggested_shares", 0))
                     post_rotate = a.get("suggested_shares_post_rotate")
                     if post_rotate is not None and post_rotate != a.get("suggested_shares", 0):
                         shares_str += f'<br><span style="color:#fd7e14;font-size:11px;">ROTATE後 {post_rotate} 股</span>'
-                    rows += f'<tr><td>#{rank}</td><td>{a["symbol"]}{shap_str}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}{ml_td}</tr>'
+                    rows += f'<tr><td>#{rank}</td><td>{a["symbol"]}{shap_str}</td>{sector_td}<td>{shares_str}</td><td>${price:.2f}</td><td>{momentum}</td>{trend_td}{rsi_html}{alpha_html}{ml_td}</tr>'
 
             for a in backup_adds:
                 price = a.get("current_price", 0)
@@ -878,13 +887,13 @@ class GmailNotifier:
                 rsi_html = _add_rsi_html(a)
                 alpha_html = _add_alpha_html(a)
                 sector_td = f'<td style="font-size:11px;color:#6c757d;">{a.get("sector") or "—"}</td>'
-                rows += f'<tr style="background:#fff9e6;"><td style="color:#856404;">備#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td>{sector_td}<td style="color:#6c757d;font-size:11px;">備選參考</td><td>${price:.2f}</td><td>{momentum}</td>{rsi_html}{alpha_html}<td></td></tr>'
+                rows += f'<tr style="background:#fff9e6;"><td style="color:#856404;">備#{a.get("momentum_rank", "?")}</td><td>{a["symbol"]}</td>{sector_td}<td style="color:#6c757d;font-size:11px;">備選參考</td><td>${price:.2f}</td><td>{momentum}</td><td></td>{rsi_html}{alpha_html}<td></td></tr>'
 
             adds_html = f'''
             <div class="section-block">
             <h3 style="color:#28a745;">ADD 建議 ({len(new_adds)} 新倉 + {len(pyramid_adds)} 金字塔 + {len(backup_adds)} 備選)</h3>
             <table style="border-collapse:collapse;width:100%;">
-                <tr style="background:#f8f9fa;"><th style="padding:8px;text-align:left;">排名</th><th style="text-align:left;">標的</th><th style="text-align:left;">板塊</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th><th>ML%</th></tr>
+                <tr style="background:#f8f9fa;"><th style="padding:8px;text-align:left;">排名</th><th style="text-align:left;">標的</th><th style="text-align:left;">板塊</th><th>建議股數</th><th>目前價格</th><th>動能</th><th>趨勢</th><th>RSI</th><th>1Y vs SPY</th><th>3Y vs SPY</th><th>ML%</th></tr>
                 {rows}
             </table>
             </div>'''

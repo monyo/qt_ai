@@ -72,11 +72,17 @@ def calculate_momentum_with_rsi(symbol: str, period: int = 21) -> dict | None:
         # 計算 RSI
         rsi = calculate_rsi(df, 14)
 
+        # 資料品質檢查：單日跳動 ≤-45% 或 ≥+90% 通常是分割未調整等資料錯誤
+        # （KLAC 案例：動能 +1233%、1Y +2650%，實為錯價）
+        daily_ret = df['Close'].pct_change()
+        suspect = bool(daily_ret.min() <= -0.45 or daily_ret.max() >= 0.9 or momentum > 500)
+
         return {
             "momentum": round(momentum, 2),
             "momentum_short": round(momentum_short, 2),
             "momentum_long": round(momentum_long, 2) if momentum_long is not None else None,
-            "rsi": rsi
+            "rsi": rsi,
+            "suspect": suspect,
         }
     except Exception:
         return None
@@ -152,6 +158,13 @@ def rank_by_momentum(symbols: list, period: int = 21, top_n: int = None, include
     scores = calculate_momentum_batch(symbols, period, include_rsi=include_rsi)
 
     if include_rsi:
+        # 資料品質防線：排除可疑標的（分割未調整等），避免進入 ADD 候選
+        suspects = {s: d for s, d in scores.items() if d.get("suspect")}
+        if suspects:
+            for s, d in suspects.items():
+                print(f"⚠ 資料異常排除：{s}（動能 {d['momentum']:+.1f}%，疑似分割未調整或錯價，不列入排名）")
+            scores = {s: d for s, d in scores.items() if not d.get("suspect")}
+
         # scores = {symbol: {"momentum": float, "momentum_short": float, "momentum_long": float, "rsi": float}}
         ranked = sorted(scores.items(), key=lambda x: x[1]["momentum"], reverse=True)
         results = []

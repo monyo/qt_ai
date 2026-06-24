@@ -33,6 +33,9 @@ python premarket_main.py
 # 新增白名單標的
 python premarket_main.py --watch PLTR COIN
 
+# 測試用（不發 Email）
+python premarket_main.py --no-email
+
 # 盤後：確認執行了哪些 actions → 更新 portfolio.json
 python confirm_main.py 2026-01-28
 
@@ -100,6 +103,7 @@ Quantitative stock scanning + position management system. Combines technical ana
 | `breadth_monitor.py` | S&P500 廣度監控（% 股票 > MA50），回測驗證廣度加權 ADD 數量有效 |
 | `wave_scanner.py` | 波浪偵測：量縮量增突破掃描 |
 | `notifier.py` | Gmail SMTP 通知。發送 HTML 摘要（本文）+ 完整 PDF（附件）|
+| `deviation_tracker.py` | 偏離成本追蹤。比較系統建議 vs 實際執行，量化「沒買的 ADD」和「延遲進場」的機會成本 |
 
 ### Key design details
 
@@ -122,6 +126,15 @@ Quantitative stock scanning + position management system. Combines technical ana
   - 主動建議換股，不限於現金不足時
   - 排除 core 和 favorite 標的
   - confirm 時可輸入實際股數（支援部分賣出/買入），sell/buy 獨立設定
+- **特殊池輪動策略（Winner Cycle）**（回測：平均 +102.5% vs 單純持有 +33.1%）：
+  - **入池條件**：持倉 1Y alpha > 100%（股票本身超強，與進場時機無關）。每日盤前 `update_winner_cycle_highs()` 更新，高點初始化取各批次 `tranche["high"]` 最大值
+  - **出場**：從 `winner_cycle_high` 回落 ≥ -10% → 產出 `source="winner_cycle"` 的 EXIT action。**無兩日確認**（異於一般追蹤停損），立即執行
+  - **觀察期**：出場後寫入 `data/winner_cycle_watch.json`，追蹤賣出後最低點，冷卻 5 日
+  - **回補**：從最低點反彈 ≥ +10%（`WINNER_CYCLE_RECOVERY`）→ 產出 `source="winner_cycle_reentry"` 的 ADD action
+  - **壓制衝突**：同標的若已有 winner_cycle EXIT，對應的 ADD（含金字塔加碼）自動標記 `wc_suppressed=True`，不顯示於建議清單
+  - **Firstrade 操作方式**：掛 Stop-Market 止損單，止損價 = `wc_high × 0.90`。開盤漲回則單子不觸發（自動跳過本次輪動）。待辦清單顯示各標的的止損掛單價
+  - **執行確認**：`confirm_main.py` 確認 EXIT 後呼叫 `confirm_winner_cycle_exit()`；確認回補 ADD 後呼叫 `confirm_winner_cycle_reentry()`
+  - **相關常數**（`src/risk.py`）：`WINNER_CYCLE_PULLBACK=0.10`、`WINNER_CYCLE_RECOVERY=0.10`、`WINNER_CYCLE_COOLDOWN=5`、`WINNER_CYCLE_ALPHA_THRESHOLD=100.0`
 - **金字塔加碼**（v0.10.0，回測 Calmar 0.386 vs 標準 0.291）：
   - 持倉動能 > 0 且批次數 < 5 時，可建議加碼（ADD action 含 `is_pyramid=True`）
   - `portfolio.json` 每個持倉有 `tranches` 陣列，記錄每批進場價/日期/停損類型

@@ -419,8 +419,30 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 entry_date = date.fromisoformat(first_entry)
                 return (today - entry_date).days
             except ValueError:
-                return 999  # 無法解析就當作很久了
+                return 999
+        # 沒有 first_entry 時，從 tranches 推算
+        tranches = pos.get("tranches", [])
+        if tranches:
+            try:
+                earliest = min(t["entry_date"] for t in tranches if t.get("entry_date"))
+                return (today - date.fromisoformat(earliest[:10])).days
+            except (ValueError, KeyError):
+                pass
         return 999
+
+    def any_tranche_in_protection(pos):
+        """任一批次仍在保護期內，則整個持倉不可 ROTATE"""
+        from src.risk import TRANCHE_PARAMS
+        for t in pos.get("tranches", []):
+            try:
+                entry_dt = date.fromisoformat(t["entry_date"][:10])
+                days_held = (today - entry_dt).days
+                protect = TRANCHE_PARAMS.get(t.get("stop_type", "standard"), TRANCHE_PARAMS["standard"])["protect"]
+                if days_held < protect:
+                    return True
+            except (ValueError, KeyError):
+                pass
+        return False
 
     # 可換股的持倉：排除核心、偏愛、已出場、保護期內、轉強中
     rotatable_positions = [
@@ -431,6 +453,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         and sym not in exit_symbols
         and momentum_map.get(sym, {}).get("momentum") is not None
         and get_holding_days(pos) >= ROTATE_HOLDING_DAYS_MIN
+        and not any_tranche_in_protection(pos)   # 任一批次在保護期內，不建議 ROTATE
         and trend_state_map.get(sym, {}).get("state") != "轉強"  # 轉強中不換，動能即將回升
     ]
 
