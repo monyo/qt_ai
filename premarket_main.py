@@ -14,7 +14,11 @@ from src.portfolio import (
 )
 from src.data_loader import get_sp500_tickers, fetch_current_prices, fetch_volumes, get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map
 from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
-from src.risk import check_position_limit, TRANCHE_PARAMS, update_dynamic_trailing
+from src.risk import (check_position_limit, TRANCHE_PARAMS, update_dynamic_trailing,
+                      update_winner_cycle_highs, check_winner_cycle_exits,
+                      load_winner_cycle_watch, save_winner_cycle_watch,
+                      update_winner_cycle_watch_lows, check_winner_cycle_reentries,
+                      WINNER_CYCLE_PULLBACK)
 from src.premarket import generate_actions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.market_environment import get_market_environment
@@ -24,6 +28,7 @@ from src.momentum import rank_by_momentum, print_momentum_report, calculate_alph
 from src.notifier import GmailNotifier
 from src.wave_scanner import scan_waves
 from src.breadth_monitor import get_breadth_status
+from src.deviation_tracker import print_deviation_report
 
 
 def get_spy_regime():
@@ -554,11 +559,12 @@ def _run_tw_section(portfolio, actions_output):
     return tw_actions
 
 
-def run_premarket(scan_tw=False):
+def run_premarket(scan_tw=False, send_email=True):
     """產出盤前建議（動能策略 + 三層出場）
 
     Args:
         scan_tw: 是否掃描台股（預設 False）
+        send_email: 是否發送 Email（預設 True，--no-email 時為 False）
     """
     os.makedirs("data", exist_ok=True)
     today_str = date.today().strftime("%Y%m%d")
@@ -679,6 +685,19 @@ def run_premarket(scan_tw=False):
     except Exception:
         pass
 
+    # 4.97 Winner Cycle：特殊池高點更新（用 alpha_1y_map 判斷股票本身是否超強，不依賴進場時機）
+    wc_new_pool = update_winner_cycle_highs(portfolio, current_prices, alpha_1y_map=alpha_1y_map)
+    if wc_new_pool:
+        print(f"🏆 新進特殊池（1Y alpha>100%）：{', '.join(wc_new_pool)}")
+        save_portfolio(portfolio)
+    elif any("winner_cycle_high" in pos for pos in portfolio.get("positions", {}).values()):
+        save_portfolio(portfolio)  # 更新週期高點
+    wc_exits = check_winner_cycle_exits(portfolio, current_prices)
+    wc_watch = load_winner_cycle_watch()
+    update_winner_cycle_watch_lows(wc_watch, current_prices)
+    save_winner_cycle_watch(wc_watch)
+    wc_reentries = check_winner_cycle_reentries(wc_watch, current_prices)
+
     # 5. 產出 actions（使用動能排名 + 三層出場 + 趨勢狀態 + 市場體制）
     actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map, market_regime=regime["regime"],
                                vix=market_env.get("vix_level", 20.0), volumes=held_volumes, vol_map=vol_map)
@@ -688,9 +707,60 @@ def run_premarket(scan_tw=False):
     if has_pending:
         save_portfolio(portfolio)
 
+    # 5.2 注入 Winner Cycle EXIT 訊號（特殊池標的從週期高點回落 -10%）
+    existing_exit_syms = {a["symbol"] for a in actions if a["action"] == "EXIT"}
+    _wc_action_id = max((a.get("id", 0) for a in actions), default=0)
+    for sym, wc in wc_exits.items():
+        if sym in existing_exit_syms:
+            continue  # 已有停損信號，不重複
+        _wc_action_id += 1
+        actions.insert(0, {
+            "id": _wc_action_id,
+            "action": "EXIT",
+            "symbol": sym,
+            "shares": wc["shares"],
+            "current_price": wc["current_price"],
+            "avg_price": wc["avg_price"],
+            "pnl_pct": wc["pnl_pct"],
+            "reason": f"特殊池輪動出場（從週期高點 ${wc['cycle_high']:.2f} 回落 {wc['from_high_pct']:.1f}%）",
+            "source": "winner_cycle",
+            "cycle_high": wc["cycle_high"],
+            "status": "pending",
+        })
+
+    # 5.2b 標記 winner cycle 出場標的的 ADD（顯示時壓制，不在建議清單出現）
+    wc_exit_syms = set(wc_exits.keys())
+    for a in actions:
+        if a["action"] == "ADD" and a.get("symbol") in wc_exit_syms:
+            a["wc_suppressed"] = True
+
+    # 5.3 注入 Winner Cycle 回補訊號（已出場標的從低點反彈 +10%）
+    existing_add_syms = {a["symbol"] for a in actions if a["action"] == "ADD"}
+    existing_hold_syms = {a["symbol"] for a in actions if a["action"] == "HOLD"}
+    for sym, wc in wc_reentries.items():
+        if sym in existing_add_syms or sym in existing_hold_syms:
+            continue  # 已在持倉或 ADD 清單中
+        _wc_action_id += 1
+        price = wc["current_price"]
+        suggested = math.floor(portfolio.get("cash", 0) / price) if price > 0 else 0
+        suggested = min(suggested, wc["shares"])  # 不超過原本持有股數
+        actions.append({
+            "id": _wc_action_id,
+            "action": "ADD",
+            "symbol": sym,
+            "current_price": price,
+            "suggested_shares": suggested,
+            "reason": (f"特殊池回補（賣出 ${wc['exit_price']:.2f}，"
+                       f"低點 ${wc['post_exit_low']:.2f}，"
+                       f"反彈 {wc['recovery_pct']:.1f}%）"),
+            "source": "winner_cycle_reentry",
+            "status": "pending",
+            "is_winner_cycle": True,
+        })
+
     # 5.5 重算 ROTATE 後的 ADD 股數（新倉 + 金字塔共用，備選不占位）
     CASH_SAFETY_FACTOR = 0.85
-    new_adds_list = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup", False) and not a.get("is_pyramid", False)]
+    new_adds_list = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup", False) and not a.get("is_pyramid", False) and not a.get("is_winner_cycle", False)]
     pyramid_adds_list = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid", False)]
     rotates_list = [a for a in actions if a["action"] == "ROTATE"]
     rotate_proceeds = sum(a["sell_shares"] * a["sell_price"] * CASH_SAFETY_FACTOR for a in rotates_list)
@@ -877,8 +947,9 @@ def run_premarket(scan_tw=False):
     # 分類印出
     exits = [a for a in actions if a["action"] == "EXIT"]
     holds = [a for a in actions if a["action"] == "HOLD"]
-    new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
-    pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid")]
+    wc_reentry_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_winner_cycle")]
+    new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid") and not a.get("is_winner_cycle") and not a.get("wc_suppressed")]
+    pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid") and not a.get("wc_suppressed")]
     backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
     adds = new_adds  # 向下相容
 
@@ -887,8 +958,30 @@ def run_premarket(scan_tw=False):
         for a in exits:
             pnl = f"{a['pnl_pct']:+.2f}%" if a.get("pnl_pct") is not None else "N/A"
             tranche_str = f" 第{a['tranche_n']}批" if a.get("tranche_n") else ""
-            print(f"  [{a['source']}] {a['symbol']:<6}{tranche_str} {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {pnl}")
+            wc_tag = " 🏆" if a.get("source") == "winner_cycle" else ""
+            print(f"  [{a['source']}]{wc_tag} {a['symbol']:<6}{tranche_str} {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {pnl}")
             print(f"         原因: {a['reason']}")
+        print()
+
+    # ── 特殊池狀態（獲利>100% 且在觀察中）──────────────────────────
+    pool_positions = {sym: pos for sym, pos in portfolio.get("positions", {}).items()
+                      if pos.get("winner_cycle_high")}
+    if pool_positions or wc_watch or wc_reentry_adds:
+        print("--- 🏆 特殊池（大贏家輪動）---")
+        for sym, pos in pool_positions.items():
+            price = current_prices.get(sym, 0)
+            cycle_high = pos["winner_cycle_high"]
+            from_high = (price / cycle_high - 1) * 100 if cycle_high else 0
+            pnl_pct = (price / pos.get("avg_price", price) - 1) * 100 if pos.get("avg_price") else 0
+            alert = "  ⚠️ 觸發賣出" if sym in wc_exits else ""
+            print(f"  持有 {sym:<6}  P&L: {pnl_pct:+.0f}%  週期高點 ${cycle_high:.2f}  距高 {from_high:+.1f}%{alert}")
+        for sym, entry in wc_watch.items():
+            price = current_prices.get(sym, 0)
+            low = entry.get("post_exit_low", 0)
+            rec = (price / low - 1) * 100 if low else 0
+            print(f"  觀察 {sym:<6}  賣出 ${entry['exit_price']:.2f}  低點 ${low:.2f}  現在 ${price:.2f}  反彈 {rec:+.1f}%  冷卻至 {entry.get('cooldown_end', '?')}")
+        for a in wc_reentry_adds:
+            print(f"  🔁 買回 {a['symbol']:<6}  建議 {a['suggested_shares']} 股 @ ${a.get('current_price', 0):.2f}  {a['reason']}")
         print()
 
     if holds:
@@ -1062,6 +1155,18 @@ def run_premarket(scan_tw=False):
                 print(f"           原因: {a['reason']}")
         print()
 
+        # 現金部署節奏控制：現金 > 20% 投組時，建議分批進場而非單日全投
+        cash_now = portfolio.get("cash", 0)
+        cash_ratio = cash_now / total_value if total_value > 0 else 0
+        if cash_ratio > 0.20 and (new_adds or pyramid_adds):
+            batch_amt = cash_now / 3
+            print(f"  💰 部署節奏提醒：現金 ${cash_now:,.0f}（{cash_ratio*100:.0f}% 投組）超過 20%")
+            print(f"     建議分 3 批投入，每批約 ${batch_amt:,.0f}，間隔 ≥2 個交易日")
+            print(f"     今日只執行第一批額度，暫停下一批的條件：")
+            print(f"       · 市場環境轉為恐慌（目前：{market_env.get('regime_label', '?')}，VIX {market_env.get('vix_level', 0):.1f}）")
+            print(f"       · 市場廣度降級（目前：{breadth_status.get('level', '?')}）")
+            print()
+
     # ROTATE 建議（汰弱留強）
     rotates = [a for a in actions if a["action"] == "ROTATE"]
     if rotates:
@@ -1150,11 +1255,12 @@ def run_premarket(scan_tw=False):
 
     # 9. 今日待辦清單（操作摘要，執行優先順序）
     exit_actions   = [a for a in actions if a["action"] == "EXIT"]
-    add_actions    = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup")]
+    wc_exit_actions = [a for a in exit_actions if a.get("source") == "winner_cycle"]
+    add_actions    = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("wc_suppressed")]
     rotate_actions = [a for a in actions if a["action"] == "ROTATE"]
     stop_reminders = _get_stop_update_reminders(portfolio, current_prices, vol_map=vol_map)
 
-    has_todo = exit_actions or stop_reminders or add_actions or rotate_actions
+    has_todo = exit_actions or stop_reminders or add_actions or rotate_actions or wc_reentry_adds
     if has_todo:
         width = 52
         print("╔" + "═" * width + "╗")
@@ -1162,11 +1268,25 @@ def run_premarket(scan_tw=False):
         print("╠" + "═" * width + "╣")
 
         if exit_actions:
-            print(f"║  {'🔴 EXIT — 立即執行（停損已觸發）':<{width-2}}║")
-            for a in exit_actions:
-                tranche_str = f" 第{a['tranche_n']}批" if a.get("tranche_n") else ""
-                line = f"     {a['symbol']}{tranche_str}  {a['shares']} 股 @ ${a.get('current_price', 0):.2f}"
-                print(f"║  {line:<{width-2}}║")
+            normal_exits = [a for a in exit_actions if a.get("source") != "winner_cycle"]
+            if normal_exits:
+                print(f"║  {'🔴 EXIT — 立即執行（停損已觸發）':<{width-2}}║")
+                for a in normal_exits:
+                    tranche_str = f" 第{a['tranche_n']}批" if a.get("tranche_n") else ""
+                    line = f"     {a['symbol']}{tranche_str}  {a['shares']} 股 @ ${a.get('current_price', 0):.2f}"
+                    print(f"║  {line:<{width-2}}║")
+            if wc_exit_actions:
+                if normal_exits:
+                    print("╠" + "─" * width + "╣")
+                print(f"║  {'🏆 特殊池出場 — 週期高點回落 -10%':<{width-2}}║")
+                for a in wc_exit_actions:
+                    line = f"     {a['symbol']}  {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {a.get('pnl_pct', 0):+.0f}%"
+                    print(f"║  {line:<{width-2}}║")
+                print(f"║  {'   📌 Firstrade Stop-Market 掛單止損價':<{width-2}}║")
+                for a in wc_exit_actions:
+                    stop_px = a.get("cycle_high", 0) * (1 - WINNER_CYCLE_PULLBACK)
+                    line = f"     {a['symbol']}  → Stop ${stop_px:.2f}"
+                    print(f"║  {line:<{width-2}}║")
 
         if stop_reminders:
             if exit_actions:
@@ -1186,11 +1306,21 @@ def run_premarket(scan_tw=False):
                 line = f"     賣 {a['sell_symbol']} → 買 {a['buy_symbol']}  {a['buy_shares']} 股"
                 print(f"║  {line:<{width-2}}║")
 
-        if add_actions:
+        if wc_reentry_adds:
             if exit_actions or stop_reminders or rotate_actions:
+                print("╠" + "─" * width + "╣")
+            print(f"║  {'🔁 特殊池回補 — 低點反彈 +10%':<{width-2}}║")
+            for a in wc_reentry_adds:
+                line = f"     {a['symbol']}  {a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}"
+                print(f"║  {line:<{width-2}}║")
+
+        if add_actions:
+            if exit_actions or stop_reminders or rotate_actions or wc_reentry_adds:
                 print("╠" + "─" * width + "╣")
             print(f"║  {'🟢 ADD — 新倉/加碼（視現金與判斷執行）':<{width-2}}║")
             for a in add_actions:
+                if a.get("is_winner_cycle"):
+                    continue
                 pyramid_str = f" 第{a['tranche_n']}批加碼" if a.get("is_pyramid") else ""
                 line = f"     {a['symbol']}{pyramid_str}  {a.get('suggested_shares', 0)} 股 @ ${a.get('current_price', 0):.2f}"
                 print(f"║  {line:<{width-2}}║")
@@ -1198,14 +1328,24 @@ def run_premarket(scan_tw=False):
         print("╚" + "═" * width + "╝")
         print()
 
+    # 9.5 偏離成本追蹤（每週一自動顯示，其他日子用 --deviation 查看）
+    if date.today().weekday() == 0:
+        try:
+            print_deviation_report(days=30)
+        except Exception as e:
+            print(f"⚠ 偏離成本追蹤失敗：{e}")
+
     # 10. 發送 Email 通知
-    notifier = GmailNotifier()
-    if notifier.is_configured():
-        print("正在發送 Email 通知...")
-        if notifier.send_premarket_report(actions_output):
-            print(f"Email 已發送至 {notifier.recipient}")
-        else:
-            print("Email 發送失敗，請檢查 .env 設定")
+    if send_email:
+        notifier = GmailNotifier()
+        if notifier.is_configured():
+            print("正在發送 Email 通知...")
+            if notifier.send_premarket_report(actions_output):
+                print(f"Email 已發送至 {notifier.recipient}")
+            else:
+                print("Email 發送失敗，請檢查 .env 設定")
+    else:
+        print("（--no-email：跳過 Email 發送）")
 
     print(f"\nActions 已儲存至: {actions_path}")
     print(f"確認執行請執行: python confirm_main.py {date.today()}")
@@ -1286,6 +1426,9 @@ def main():
     parser.add_argument("--momentum", nargs="?", const=20, type=int,
                         metavar="N", help="查看動能排名（預設前20名）")
     parser.add_argument("--tw", action="store_true", help="掃描台股（預設關閉）")
+    parser.add_argument("--deviation", nargs="?", const=30, type=int,
+                        metavar="DAYS", help="偏離成本追蹤（預設近30天）")
+    parser.add_argument("--no-email", action="store_true", help="跳過 Email 發送（測試用）")
     args = parser.parse_args()
 
     if args.init:
@@ -1296,8 +1439,10 @@ def main():
         run_snapshot(args.snapshot)
     elif args.momentum:
         run_momentum(args.momentum)
+    elif args.deviation:
+        print_deviation_report(days=args.deviation)
     else:
-        run_premarket(scan_tw=args.tw)
+        run_premarket(scan_tw=args.tw, send_email=not args.no_email)
 
 
 if __name__ == "__main__":

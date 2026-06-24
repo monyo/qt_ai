@@ -1,4 +1,6 @@
-from datetime import date as _date
+import json
+import os
+from datetime import date as _date, timedelta
 from src.portfolio import _ensure_tranches
 
 TRANCHE_PARAMS = {
@@ -382,6 +384,162 @@ def update_dynamic_trailing(portfolio, current_prices):
                 t["trailing_pct"] = tightened
                 newly_tightened.append(f"{symbol} 第{t['n']}批（{stop_type}→{tightened*100:.0f}%）")
     return newly_tightened
+
+
+# ── Winner Cycle：特殊池輪動策略 ───────────────────────────────────────────────
+# 回測（_winner_cycle_backtest.py）：獲利>100% 的標的從高點回落 -10% 時賣出，
+# 低點反彈 +10% 時買回，平均報酬 +102.5% vs 純持有 +33.1%，勝率 55%。
+WINNER_CYCLE_PULLBACK        = 0.10    # 從週期高點回落 -10% 時賣出
+WINNER_CYCLE_RECOVERY        = 0.10    # 從賣出後低點反彈 +10% 時買回
+WINNER_CYCLE_COOLDOWN        = 5       # 賣出後至少等 5 天才能買回
+WINNER_CYCLE_ALPHA_THRESHOLD = 100.0  # 1Y alpha > 100%（股票本身超額報酬，不依賴進場時機）
+WINNER_CYCLE_WATCH_FILE      = "data/winner_cycle_watch.json"
+
+
+def update_winner_cycle_highs(portfolio, current_prices, alpha_1y_map=None):
+    """更新特殊池持倉的週期高點（winner_cycle_high）。
+
+    進入特殊池條件（優先使用 alpha_1y_map，反映股票本身動能而非進場時機）：
+    - 提供 alpha_1y_map：該標的 1Y alpha > WINNER_CYCLE_ALPHA_THRESHOLD（預設 100%）
+    - 未提供：持倉獲利 > 100%（fallback，向後相容）
+
+    Returns: 本次新進入特殊池的 symbol 列表
+    """
+    newly_entered = []
+    for sym, pos in portfolio.get("positions", {}).items():
+        if pos.get("core"):
+            continue
+        price = current_prices.get(sym)
+        if price is None:
+            continue
+
+        if alpha_1y_map is not None:
+            alpha = alpha_1y_map.get(sym)
+            qualifies = alpha is not None and alpha > WINNER_CYCLE_ALPHA_THRESHOLD
+        else:
+            avg_price = pos.get("avg_price", 0)
+            qualifies = avg_price > 0 and (price - avg_price) / avg_price >= 1.0
+
+        if qualifies:
+            if "winner_cycle_high" not in pos:
+                # 用各批次追蹤到的最高價初始化（不是今天報價），避免忽略已發生的回落
+                _ensure_tranches(pos)
+                hist_high = max((t.get("high", t.get("entry_price", 0)) for t in pos["tranches"]), default=price)
+                pos["winner_cycle_high"] = max(hist_high, price)
+                pos["winner_cycle_pool_date"] = str(_date.today())
+                newly_entered.append(sym)
+            else:
+                pos["winner_cycle_high"] = max(pos["winner_cycle_high"], price)
+        else:
+            pos.pop("winner_cycle_high", None)
+            pos.pop("winner_cycle_pool_date", None)
+    return newly_entered
+
+
+def check_winner_cycle_exits(portfolio, current_prices):
+    """找出特殊池中從週期高點回落 ≥ WINNER_CYCLE_PULLBACK 的持倉。
+
+    Returns: {symbol: {"cycle_high", "current_price", "from_high_pct", "shares", "avg_price"}}
+    """
+    exits = {}
+    for sym, pos in portfolio.get("positions", {}).items():
+        if pos.get("core"):
+            continue
+        cycle_high = pos.get("winner_cycle_high")
+        if cycle_high is None:
+            continue
+        price = current_prices.get(sym)
+        if price is None:
+            continue
+        from_high = (price - cycle_high) / cycle_high
+        if from_high <= -WINNER_CYCLE_PULLBACK:
+            _ensure_tranches(pos)
+            total_shares = sum(t["shares"] for t in pos["tranches"])
+            pnl_pct = (price - pos.get("avg_price", price)) / pos.get("avg_price", price) * 100 if pos.get("avg_price") else 0
+            exits[sym] = {
+                "cycle_high": cycle_high,
+                "current_price": price,
+                "from_high_pct": round(from_high * 100, 1),
+                "shares": total_shares,
+                "avg_price": pos.get("avg_price", 0),
+                "pnl_pct": round(pnl_pct, 2),
+            }
+    return exits
+
+
+def load_winner_cycle_watch():
+    """載入特殊池出場後的觀察名單"""
+    if os.path.exists(WINNER_CYCLE_WATCH_FILE):
+        try:
+            with open(WINNER_CYCLE_WATCH_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def save_winner_cycle_watch(watch):
+    """儲存特殊池觀察名單"""
+    os.makedirs("data", exist_ok=True)
+    with open(WINNER_CYCLE_WATCH_FILE, "w", encoding="utf-8") as f:
+        json.dump(watch, f, ensure_ascii=False, indent=2)
+
+
+def update_winner_cycle_watch_lows(watch, current_prices):
+    """更新觀察名單中各標的的賣出後最低價"""
+    for sym, entry in watch.items():
+        price = current_prices.get(sym)
+        if price is not None:
+            entry["post_exit_low"] = min(entry.get("post_exit_low", price), price)
+
+
+def check_winner_cycle_reentries(watch, current_prices):
+    """找出觀察名單中已從低點反彈 ≥ WINNER_CYCLE_RECOVERY 且冷卻期已過的標的。
+
+    Returns: {symbol: {"exit_price", "post_exit_low", "recovery_pct", "shares", "avg_price"}}
+    """
+    today = str(_date.today())
+    reentries = {}
+    for sym, entry in watch.items():
+        if today <= entry.get("cooldown_end", ""):
+            continue
+        price = current_prices.get(sym)
+        post_exit_low = entry.get("post_exit_low", entry.get("exit_price", 0))
+        if price is None or post_exit_low <= 0:
+            continue
+        recovery = price / post_exit_low - 1
+        if recovery >= WINNER_CYCLE_RECOVERY:
+            reentries[sym] = {
+                "exit_price": entry.get("exit_price", 0),
+                "post_exit_low": post_exit_low,
+                "recovery_pct": round(recovery * 100, 1),
+                "shares": entry.get("shares", 0),
+                "avg_price": entry.get("avg_price", 0),
+                "current_price": price,
+            }
+    return reentries
+
+
+def confirm_winner_cycle_exit(symbol, shares, exit_price, avg_price):
+    """確認特殊池出場，寫入觀察名單等待回補"""
+    watch = load_winner_cycle_watch()
+    cooldown_end = str(_date.today() + timedelta(days=WINNER_CYCLE_COOLDOWN))
+    watch[symbol] = {
+        "exit_date": str(_date.today()),
+        "exit_price": exit_price,
+        "post_exit_low": exit_price,
+        "cooldown_end": cooldown_end,
+        "shares": shares,
+        "avg_price": avg_price,
+    }
+    save_winner_cycle_watch(watch)
+
+
+def confirm_winner_cycle_reentry(symbol):
+    """確認特殊池回補，從觀察名單移除"""
+    watch = load_winner_cycle_watch()
+    watch.pop(symbol, None)
+    save_winner_cycle_watch(watch)
 
 
 def check_position_limit(portfolio, max_stocks=30):

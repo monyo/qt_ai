@@ -4,6 +4,7 @@ import os
 from datetime import date
 
 from src.portfolio import load_portfolio, save_portfolio, apply_confirmed_actions
+from src.risk import confirm_winner_cycle_exit, confirm_winner_cycle_reentry
 
 
 def _ask_shares_price(prompt_sym, default_shares, default_price, action="買入"):
@@ -60,7 +61,11 @@ def run_confirm(date_str):
             a["status"] = "confirmed"
             a["confirm_date"] = today_str
             confirmed_actions.append(a)
-            print("  -> 已確認\n")
+            if a.get("source") == "winner_cycle":
+                confirm_winner_cycle_exit(sym, sh, pr, a.get("avg_price", 0))
+                print("  -> 已確認（已加入特殊池觀察名單，等待回補）\n")
+            else:
+                print("  -> 已確認\n")
         else:
             a["status"] = "skipped"
             print("  -> 已跳過\n")
@@ -161,6 +166,10 @@ def run_confirm(date_str):
                 add_a["actual_price"] = pr
                 add_a["status"] = "confirmed"
                 add_a["confirm_date"] = today_str
+                if add_a.get("source") == "winner_cycle_reentry":
+                    confirm_winner_cycle_reentry(sym)
+                    print("  -> 已確認（已從特殊池觀察名單移除）\n")
+                    continue
             for r in rot_as:
                 r["actual_buy_shares"] = sh
                 r["actual_buy_price"] = pr
