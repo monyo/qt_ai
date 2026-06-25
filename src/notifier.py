@@ -181,6 +181,7 @@ class GmailNotifier:
 
         # EXIT 表
         exit_html = ""
+        wc_exits = [a for a in exits if a.get("source") == "winner_cycle"]
         if exits:
             rows = ""
             for a in exits:
@@ -189,6 +190,22 @@ class GmailNotifier:
                 tranche_str = f" 第{a['tranche_n']}批" if a.get("tranche_n") else ""
                 rows += f'<tr style="background:#fdf2f2;"><td style="padding:5px 8px;font-weight:bold;">{a["symbol"]}{tranche_str}</td><td style="padding:5px 8px;">{a.get("shares", 0)} 股</td><td style="padding:5px 8px;color:{pnl_color};">{pnl:+.1f}%</td><td style="padding:5px 8px;font-size:11px;color:#666;">{a.get("reason", "")[:60]}</td></tr>'
             exit_html = f'<h3 style="color:#dc3545;margin:14px 0 5px;">⛔ EXIT ({len(exits)} 筆)</h3><table style="border-collapse:collapse;width:100%;font-size:12px;"><tr style="background:#f0f0f0;"><th style="padding:5px 8px;text-align:left;">標的</th><th>股數</th><th>P&amp;L</th><th style="text-align:left;">原因</th></tr>{rows}</table>'
+            if wc_exits:
+                stop_rows = "".join(
+                    f'<tr><td style="padding:4px 8px;font-weight:bold;">{a["symbol"]}</td>'
+                    f'<td style="padding:4px 8px;font-family:monospace;color:#856404;">${a["wc_stop_px"]:.2f}</td>'
+                    f'<td style="padding:4px 8px;font-size:11px;color:#666;">wc_high ${a.get("cycle_high",0):.2f} × 90%</td></tr>'
+                    for a in wc_exits if a.get("wc_stop_px")
+                )
+                exit_html += (
+                    f'<div style="background:#fff8e1;border-left:4px solid #ffc107;padding:8px 12px;margin-top:8px;border-radius:0 4px 4px 0;">'
+                    f'<strong>📌 Firstrade Stop-Market 掛單價（特殊池輪動）</strong><br>'
+                    f'<table style="border-collapse:collapse;font-size:12px;margin-top:4px;">'
+                    f'<tr style="background:#ffeeba;"><th style="padding:3px 8px;text-align:left;">標的</th><th style="padding:3px 8px;text-align:left;">止損觸發價</th><th style="padding:3px 8px;text-align:left;">計算</th></tr>'
+                    f'{stop_rows}</table>'
+                    f'<span style="font-size:11px;color:#856404;">開盤在止損價以上 → 單子不觸發，自動跳過本次輪動</span>'
+                    f'</div>'
+                )
 
         # ROTATE 表
         rotate_html = ""

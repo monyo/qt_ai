@@ -725,6 +725,7 @@ def run_premarket(scan_tw=False, send_email=True):
             "reason": f"特殊池輪動出場（從週期高點 ${wc['cycle_high']:.2f} 回落 {wc['from_high_pct']:.1f}%）",
             "source": "winner_cycle",
             "cycle_high": wc["cycle_high"],
+            "wc_stop_px": round(wc["cycle_high"] * (1 - WINNER_CYCLE_PULLBACK), 2),
             "status": "pending",
         })
 
