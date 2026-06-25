@@ -18,7 +18,7 @@ from src.risk import (check_position_limit, TRANCHE_PARAMS, update_dynamic_trail
                       update_winner_cycle_highs, check_winner_cycle_exits,
                       load_winner_cycle_watch, save_winner_cycle_watch,
                       update_winner_cycle_watch_lows, check_winner_cycle_reentries,
-                      WINNER_CYCLE_PULLBACK)
+                      WINNER_CYCLE_PULLBACK, WINNER_CYCLE_RECOVERY)
 from src.premarket import generate_actions, VERSION
 from src.sector_monitor import get_sector_summary, check_holdings_sector_exposure
 from src.market_environment import get_market_environment
@@ -742,6 +742,8 @@ def run_premarket(scan_tw=False, send_email=True):
             "source": "winner_cycle",
             "cycle_high": wc["cycle_high"],
             "wc_stop_px": round(wc["cycle_high"] * (1 - WINNER_CYCLE_PULLBACK), 2),
+            "wc_rebound_px": round(wc["exit_period_low"] * (1 + WINNER_CYCLE_RECOVERY), 2),
+            "wc_exit_low": wc["exit_period_low"],
             "status": "pending",
         })
 
@@ -1299,10 +1301,11 @@ def run_premarket(scan_tw=False, send_email=True):
                 for a in wc_exit_actions:
                     line = f"     {a['symbol']}  {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  P&L: {a.get('pnl_pct', 0):+.0f}%"
                     print(f"║  {line:<{width-2}}║")
-                print(f"║  {'   📌 Firstrade Stop-Market 掛單止損價':<{width-2}}║")
+                print(f"║  {'   📌 Firstrade Stop-Market 掛單 / 反彈取消線':<{width-2}}║")
                 for a in wc_exit_actions:
-                    stop_px = a.get("cycle_high", 0) * (1 - WINNER_CYCLE_PULLBACK)
-                    line = f"     {a['symbol']}  → Stop ${stop_px:.2f}"
+                    stop_px = a.get("wc_stop_px", 0)
+                    rebound_px = a.get("wc_rebound_px", 0)
+                    line = f"     {a['symbol']}  止損 ${stop_px:.2f}  反彈取消 ${rebound_px:.2f}"
                     print(f"║  {line:<{width-2}}║")
 
         if stop_reminders:

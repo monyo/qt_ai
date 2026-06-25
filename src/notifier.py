@@ -193,17 +193,18 @@ class GmailNotifier:
             if wc_exits:
                 stop_rows = "".join(
                     f'<tr><td style="padding:4px 8px;font-weight:bold;">{a["symbol"]}</td>'
-                    f'<td style="padding:4px 8px;font-family:monospace;color:#856404;">${a["wc_stop_px"]:.2f}</td>'
-                    f'<td style="padding:4px 8px;font-size:11px;color:#666;">wc_high ${a.get("cycle_high",0):.2f} × 90%</td></tr>'
+                    f'<td style="padding:4px 8px;font-family:monospace;color:#dc3545;">${a["wc_stop_px"]:.2f}</td>'
+                    f'<td style="padding:4px 8px;font-family:monospace;color:#28a745;">${a.get("wc_rebound_px", 0):.2f}</td>'
+                    f'<td style="padding:4px 8px;font-size:11px;color:#666;">低點 ${a.get("wc_exit_low",0):.2f} × 110%</td></tr>'
                     for a in wc_exits if a.get("wc_stop_px")
                 )
                 exit_html += (
                     f'<div style="background:#fff8e1;border-left:4px solid #ffc107;padding:8px 12px;margin-top:8px;border-radius:0 4px 4px 0;">'
-                    f'<strong>📌 Firstrade Stop-Market 掛單價（特殊池輪動）</strong><br>'
+                    f'<strong>📌 特殊池出場參考價</strong><br>'
                     f'<table style="border-collapse:collapse;font-size:12px;margin-top:4px;">'
-                    f'<tr style="background:#ffeeba;"><th style="padding:3px 8px;text-align:left;">標的</th><th style="padding:3px 8px;text-align:left;">止損觸發價</th><th style="padding:3px 8px;text-align:left;">計算</th></tr>'
+                    f'<tr style="background:#ffeeba;"><th style="padding:3px 8px;text-align:left;">標的</th><th style="padding:3px 8px;text-align:left;">🔴 止損觸發價</th><th style="padding:3px 8px;text-align:left;">🟢 反彈取消線</th><th style="padding:3px 8px;text-align:left;">計算基礎</th></tr>'
                     f'{stop_rows}</table>'
-                    f'<span style="font-size:11px;color:#856404;">開盤在止損價以上 → 單子不觸發，自動跳過本次輪動</span>'
+                    f'<span style="font-size:11px;color:#856404;">開盤 &gt; 反彈取消線 → 出場窗口已過，Hold住<br>開盤 &lt; 止損觸發價 → EXIT 訊號有效，執行賣出</span>'
                     f'</div>'
                 )
 

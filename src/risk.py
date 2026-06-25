@@ -460,13 +460,13 @@ def check_winner_cycle_exits(portfolio, current_prices, hist_prices=None):
         if from_high > -WINNER_CYCLE_PULLBACK:
             continue
 
-        # 觸發 EXIT 條件。檢查是否已錯過出場窗口（當前 EXIT 期間低點已反彈 ≥ WINNER_CYCLE_RECOVERY）
+        # 觸發 EXIT 條件。計算當前出場期間低點，供反彈取消線使用
+        exit_period_low = price  # 預設：以當前價格作低點（無歷史資料時）
         if hist_prices and sym in hist_prices:
             series = hist_prices[sym].dropna()
             if len(series) > 0:
                 exit_threshold = cycle_high * (1 - WINNER_CYCLE_PULLBACK)
                 # 找最近一次「價格在門檻之上」的位置，只取其後的低點
-                # 這樣可以排除 wc_high 更新前的舊低點
                 last_above_loc = None
                 for i in range(len(series) - 1, -1, -1):
                     if float(series.iloc[i]) > exit_threshold:
@@ -478,6 +478,7 @@ def check_winner_cycle_exits(portfolio, current_prices, hist_prices=None):
                     current_exit_series = series
                 if len(current_exit_series) > 0:
                     recent_low = float(current_exit_series.min())
+                    exit_period_low = recent_low
                     recovery = (price - recent_low) / recent_low
                     if recovery >= WINNER_CYCLE_RECOVERY:
                         cancelled.append(f"{sym}（低點${recent_low:.1f} 已反彈{recovery*100:.1f}%，出場窗口已過）")
@@ -493,6 +494,7 @@ def check_winner_cycle_exits(portfolio, current_prices, hist_prices=None):
             "shares": total_shares,
             "avg_price": pos.get("avg_price", 0),
             "pnl_pct": round(pnl_pct, 2),
+            "exit_period_low": round(exit_period_low, 2),
         }
     if cancelled:
         print(f"  ℹ️  特殊池 EXIT 取消（出場窗口已過）：{', '.join(cancelled)}")
