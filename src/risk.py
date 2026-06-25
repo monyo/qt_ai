@@ -436,12 +436,17 @@ def update_winner_cycle_highs(portfolio, current_prices, alpha_1y_map=None):
     return newly_entered
 
 
-def check_winner_cycle_exits(portfolio, current_prices):
+def check_winner_cycle_exits(portfolio, current_prices, hist_prices=None):
     """找出特殊池中從週期高點回落 ≥ WINNER_CYCLE_PULLBACK 的持倉。
+
+    hist_prices: {sym: pd.Series} 近期收盤價序列。
+        若提供，會額外檢查「近期低點是否已反彈 ≥ WINNER_CYCLE_RECOVERY」。
+        若是，代表出場窗口已過（延遲執行導致），取消 EXIT 建議。
 
     Returns: {symbol: {"cycle_high", "current_price", "from_high_pct", "shares", "avg_price"}}
     """
     exits = {}
+    cancelled = []
     for sym, pos in portfolio.get("positions", {}).items():
         if pos.get("core"):
             continue
@@ -452,18 +457,32 @@ def check_winner_cycle_exits(portfolio, current_prices):
         if price is None:
             continue
         from_high = (price - cycle_high) / cycle_high
-        if from_high <= -WINNER_CYCLE_PULLBACK:
-            _ensure_tranches(pos)
-            total_shares = sum(t["shares"] for t in pos["tranches"])
-            pnl_pct = (price - pos.get("avg_price", price)) / pos.get("avg_price", price) * 100 if pos.get("avg_price") else 0
-            exits[sym] = {
-                "cycle_high": cycle_high,
-                "current_price": price,
-                "from_high_pct": round(from_high * 100, 1),
-                "shares": total_shares,
-                "avg_price": pos.get("avg_price", 0),
-                "pnl_pct": round(pnl_pct, 2),
-            }
+        if from_high > -WINNER_CYCLE_PULLBACK:
+            continue
+
+        # 觸發 EXIT 條件。檢查是否已錯過出場窗口（近期低點已反彈 ≥ WINNER_CYCLE_RECOVERY）
+        if hist_prices and sym in hist_prices:
+            series = hist_prices[sym].dropna()
+            if len(series) > 0:
+                recent_low = float(series.min())
+                recovery = (price - recent_low) / recent_low
+                if recovery >= WINNER_CYCLE_RECOVERY:
+                    cancelled.append(f"{sym}（低點${recent_low:.1f} 已反彈{recovery*100:.1f}%，出場窗口已過）")
+                    continue
+
+        _ensure_tranches(pos)
+        total_shares = sum(t["shares"] for t in pos["tranches"])
+        pnl_pct = (price - pos.get("avg_price", price)) / pos.get("avg_price", price) * 100 if pos.get("avg_price") else 0
+        exits[sym] = {
+            "cycle_high": cycle_high,
+            "current_price": price,
+            "from_high_pct": round(from_high * 100, 1),
+            "shares": total_shares,
+            "avg_price": pos.get("avg_price", 0),
+            "pnl_pct": round(pnl_pct, 2),
+        }
+    if cancelled:
+        print(f"  ℹ️  特殊池 EXIT 取消（出場窗口已過）：{', '.join(cancelled)}")
     return exits
 
 

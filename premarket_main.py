@@ -692,7 +692,23 @@ def run_premarket(scan_tw=False, send_email=True):
         save_portfolio(portfolio)
     elif any("winner_cycle_high" in pos for pos in portfolio.get("positions", {}).values()):
         save_portfolio(portfolio)  # 更新週期高點
-    wc_exits = check_winner_cycle_exits(portfolio, current_prices)
+    # 抓近 10 日歷史，用於過濾「出場窗口已過」的 EXIT 訊號
+    _wc_pool_syms = [s for s, pos in portfolio.get("positions", {}).items() if pos.get("winner_cycle_high")]
+    _wc_hist: dict = {}
+    if _wc_pool_syms:
+        try:
+            import yfinance as _yf
+            _h = _yf.download(_wc_pool_syms, period="10d", auto_adjust=True, progress=False)["Close"]
+            _h = _h.ffill()
+            if len(_wc_pool_syms) == 1:
+                _wc_hist[_wc_pool_syms[0]] = _h
+            else:
+                for _s in _wc_pool_syms:
+                    if _s in _h.columns:
+                        _wc_hist[_s] = _h[_s]
+        except Exception:
+            pass
+    wc_exits = check_winner_cycle_exits(portfolio, current_prices, hist_prices=_wc_hist)
     wc_watch = load_winner_cycle_watch()
     update_winner_cycle_watch_lows(wc_watch, current_prices)
     save_winner_cycle_watch(wc_watch)
