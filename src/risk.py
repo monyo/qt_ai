@@ -460,15 +460,28 @@ def check_winner_cycle_exits(portfolio, current_prices, hist_prices=None):
         if from_high > -WINNER_CYCLE_PULLBACK:
             continue
 
-        # 觸發 EXIT 條件。檢查是否已錯過出場窗口（近期低點已反彈 ≥ WINNER_CYCLE_RECOVERY）
+        # 觸發 EXIT 條件。檢查是否已錯過出場窗口（當前 EXIT 期間低點已反彈 ≥ WINNER_CYCLE_RECOVERY）
         if hist_prices and sym in hist_prices:
             series = hist_prices[sym].dropna()
             if len(series) > 0:
-                recent_low = float(series.min())
-                recovery = (price - recent_low) / recent_low
-                if recovery >= WINNER_CYCLE_RECOVERY:
-                    cancelled.append(f"{sym}（低點${recent_low:.1f} 已反彈{recovery*100:.1f}%，出場窗口已過）")
-                    continue
+                exit_threshold = cycle_high * (1 - WINNER_CYCLE_PULLBACK)
+                # 找最近一次「價格在門檻之上」的位置，只取其後的低點
+                # 這樣可以排除 wc_high 更新前的舊低點
+                last_above_loc = None
+                for i in range(len(series) - 1, -1, -1):
+                    if float(series.iloc[i]) > exit_threshold:
+                        last_above_loc = i
+                        break
+                if last_above_loc is not None:
+                    current_exit_series = series.iloc[last_above_loc + 1:]
+                else:
+                    current_exit_series = series
+                if len(current_exit_series) > 0:
+                    recent_low = float(current_exit_series.min())
+                    recovery = (price - recent_low) / recent_low
+                    if recovery >= WINNER_CYCLE_RECOVERY:
+                        cancelled.append(f"{sym}（低點${recent_low:.1f} 已反彈{recovery*100:.1f}%，出場窗口已過）")
+                        continue
 
         _ensure_tranches(pos)
         total_shares = sum(t["shares"] for t in pos["tranches"])
