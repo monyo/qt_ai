@@ -348,6 +348,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
             if alpha_1y is not None and alpha_1y < -20:
                 reason += f" ⚠️ 1年落後大盤 {alpha_1y:.0f}%"
 
+            trend_info = trend_state_map.get(symbol, {})
             actions.append({
                 "id": action_id,
                 "action": "ADD",
@@ -360,6 +361,7 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
                 "alpha_1y": alpha_1y,
                 "alpha_3y": alpha_3y,
                 "is_backup": is_backup,
+                "trend_state": trend_info.get("state", "盤整") if trend_info else "盤整",
                 "reason": reason,
                 "source": "momentum",
                 "status": "pending",

@@ -26,11 +26,12 @@ class GmailNotifier:
         """檢查是否已設定必要參數"""
         return all([self.sender, self.password, self.recipient, self.enabled])
 
-    def send_premarket_report(self, actions_data):
+    def send_premarket_report(self, actions_data, qualitative_data=None):
         """發送盤前報告
 
         Args:
             actions_data: actions JSON 資料（與儲存到檔案的格式相同）
+            qualitative_data: 質化分析 JSON（可選），格式見 _format_qualitative_html
 
         Returns:
             bool: 是否發送成功
@@ -43,10 +44,11 @@ class GmailNotifier:
 
         regime = actions_data.get("regime_status", {})
         regime_tag = " 🔴BEAR" if not regime.get("is_bull", True) else ""
-        subject = f"盤前報告 {actions_data['date']} | 投組 ${total_value:,.0f}{regime_tag}"
+        qual_tag = " 🔍" if qualitative_data else ""
+        subject = f"盤前報告 {actions_data['date']} | 投組 ${total_value:,.0f}{regime_tag}{qual_tag}"
         text_body = self._format_text_report(actions_data)
-        summary_html = self._format_summary_html(actions_data)
-        full_html = self._format_html_report(actions_data)
+        summary_html = self._format_summary_html(actions_data, qualitative_data=qualitative_data)
+        full_html = self._format_html_report(actions_data, qualitative_data=qualitative_data)
 
         data_dir = pathlib.Path("data")
         year = datetime.date.today().year
@@ -106,7 +108,50 @@ class GmailNotifier:
             print(f"PDF 生成失敗: {e}")
             return None
 
-    def _format_summary_html(self, data):
+    def _format_qualitative_html(self, qualitative_data):
+        """產生質化分析 HTML 區段"""
+        if not qualitative_data:
+            return ""
+        analyses = qualitative_data.get("analyses", [])
+        if not analyses:
+            return ""
+
+        score_style = {
+            "✅ 積極建議": ("background:#d4edda;border-left:4px solid #28a745;", "#155724"),
+            "🟡 可考慮":   ("background:#fff3cd;border-left:4px solid #ffc107;", "#856404"),
+            "⚠️ 等待":    ("background:#fff3cd;border-left:4px solid #fd7e14;", "#7d3c00"),
+            "❌ 不建議":  ("background:#f8d7da;border-left:4px solid #dc3545;", "#721c24"),
+        }
+
+        cards = ""
+        for a in analyses:
+            verdict = a.get("verdict", "⚠️ 等待")
+            box_style, text_color = score_style.get(verdict, score_style["⚠️ 等待"])
+            score = a.get("score", 50)
+            trigger = a.get("trigger", "")
+            cards += f'''
+<div style="{box_style}padding:10px 14px;border-radius:6px;margin:8px 0;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+    <span style="font-weight:bold;font-size:15px;">{a['symbol']}</span>
+    <span style="color:{text_color};font-weight:bold;">{verdict} &nbsp; {score}/100</span>
+    <span style="color:#888;font-size:12px;">觸發: {trigger}</span>
+  </div>
+  <div style="font-size:13px;line-height:1.6;">
+    <div>💡 <strong>催化劑：</strong>{a.get('catalyst', '—')}</div>
+    <div>⚠️ <strong>風險：</strong>{a.get('risk', '—')}</div>
+    <div>📌 <strong>建議：</strong>{a.get('recommendation', '—')}</div>
+  </div>
+</div>'''
+
+        return f'''
+<div style="margin:16px 0;">
+  <h3 style="color:#333;border-bottom:2px solid #dee2e6;padding-bottom:6px;margin-bottom:10px;">
+    🔍 質化補充分析
+  </h3>
+  {cards}
+</div>'''
+
+    def _format_summary_html(self, data, qualitative_data=None):
         """產生簡短摘要 HTML（email 本文）"""
         portfolio = data.get("portfolio_snapshot", {})
         actions = data.get("actions", [])
@@ -258,6 +303,8 @@ class GmailNotifier:
                 + '</div>'
             )
 
+        qual_html = self._format_qualitative_html(qualitative_data)
+
         return f'''<html>
 <body style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;padding:20px;color:#333;">
   <h2 style="margin-bottom:4px;">盤前報告 {data["date"]}</h2>
@@ -275,6 +322,7 @@ class GmailNotifier:
   {exit_html}
   {rotate_html}
   {add_html}
+  {qual_html}
   {hold_html}
   {tw_section_html}
 
@@ -524,7 +572,7 @@ class GmailNotifier:
 
         return "\n".join(lines)
 
-    def _format_html_report(self, data):
+    def _format_html_report(self, data, qualitative_data=None):
         """產生 HTML 報告"""
         portfolio = data.get("portfolio_snapshot", {})
         sector = data.get("sector_status", {})
@@ -875,8 +923,8 @@ class GmailNotifier:
                     shap_parts = [f"{arrow}{label}" for label, sv, arrow in shap_top]
                     shap_str = f'<br><span style="font-size:10px;color:#6c757d;">{" | ".join(shap_parts)}</span>'
 
-                ts = a.get("trend_state") or {}
-                ts_state = ts.get("state", "")
+                ts = a.get("trend_state") or ""
+                ts_state = ts.get("state", "") if isinstance(ts, dict) else ts
                 if ts_state == "轉強":
                     trend_td = '<td style="text-align:center;color:#28a745;">↗️轉強</td>'
                 elif ts_state == "轉弱":
@@ -1097,6 +1145,8 @@ class GmailNotifier:
             {topups_html}
             {tw_portfolio_html}
             {tw_stocks_html}
+
+            {self._format_qualitative_html(qualitative_data)}
 
             <hr style="margin:30px 0;border:none;border-top:1px solid #ddd;">
             <p style="color:#6c757d;font-size:12px;">此郵件由盤前建議系統自動發送</p>
