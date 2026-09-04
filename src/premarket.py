@@ -8,6 +8,7 @@ VERSION = "0.10.0"  # 金字塔加碼策略（差異停損），取代 TOPUP 機
 # 汰弱留強參數（參考學術研究的定期重新排名邏輯）
 ROTATE_MOMENTUM_DIFF = 10      # 動能差距門檻 (%)，從 20% 降至 10%
 ROTATE_HOLDING_DAYS_MIN = 30   # 最少持有天數，從 60 天降至 30 天
+ROTATE_DECEL_LOOKBACK_MONTHS = 2  # 賣出端自身動能衰退確認回看月數（回測見 research/_rotate_decel_backtest.py）
 
 # 金字塔加碼參數
 MAX_PYRAMID = 5       # 最大批次數（同回測最佳參數）
@@ -471,11 +472,38 @@ def generate_actions(portfolio, current_prices, ma200_prices=None, momentum_rank
         and _alpha_qualifies(m["symbol"])
     ]
 
+    def _self_momentum_not_declining(sym, current_momentum):
+        """檢查持倉自身動能是否『沒有』真的比 N 個月前更差。
+
+        現行邏輯只比較「對手動能是否大幅領先」，沒檢查「自己是不是真的轉弱」——
+        對手可能只是單月曇花一現的衝刺（如 ECHO 案例），此時不該賣掉動能仍在
+        增強的持股。回測（research/_rotate_decel_backtest.py，2個月回看）顯示：
+        加上這層確認後 whipsaw（賣飛後又追高買回）事件從 4 次降到 1 次，
+        整體報酬不變甚至略升。
+
+        Fallback：算不出歷史動能（新股/資料不足，calculate_momentum_as_of 回傳
+        None）時，回傳 True（視為「沒有證據顯示沒轉弱」），退回現行邏輯，不擋賣出。
+        """
+        if current_momentum is None:
+            return True
+        try:
+            from src.momentum import calculate_momentum_as_of
+            past_momentum = calculate_momentum_as_of(sym, months_back=ROTATE_DECEL_LOOKBACK_MONTHS)
+        except Exception:
+            return True
+        if past_momentum is None:
+            return True  # 資料不足，fallback 回現行邏輯
+        return current_momentum >= past_momentum  # 自己動能沒退步 → 不該只因對手更強就賣
+
     # 對每個弱勢持倉，檢查是否有夠強的候選可換
     rotate_used_candidates = set()  # 已被配對的候選
     for sym, pos, pos_momentum, holding_days in rotatable_positions:
         pos_price = current_prices.get(sym, 0)
         if pos_price <= 0:
+            continue
+
+        # 自身動能其實還在增強/持平，不因對手一時衝刺就賣（詳見 _self_momentum_not_declining）
+        if _self_momentum_not_declining(sym, pos_momentum):
             continue
 
         # 找一個還沒被配對的強勢候選
