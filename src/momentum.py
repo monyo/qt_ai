@@ -52,8 +52,14 @@ def calculate_momentum_with_rsi(symbol: str, period: int = 21) -> dict | None:
 
     try:
         # 取得足夠的數據來計算長期動能(252天) + RSI(14天)
-        df = yf.Ticker(symbol).history(period="1y")
-        if df.empty or len(df) < max(period, 20):
+        # 注意：period="1y" 實測只回傳約251個交易日，比 LONG_PERIOD+1=253 少，
+        # 會導致長期動能永遠算不出來、悄悄退化成純短期動能（2026-08-25 發現的 bug）。
+        # 改用 "2y"（約500個交易日）確保長期動能有足夠資料。
+        df = yf.Ticker(symbol).history(period="2y")
+        if "Close" not in df:
+            return None
+        df = df.dropna(subset=["Close"])
+        if len(df) < max(period, 20):
             return None
 
         # 計算短期動能
@@ -88,6 +94,53 @@ def calculate_momentum_with_rsi(symbol: str, period: int = 21) -> dict | None:
         return None
 
 
+def calculate_momentum_as_of(symbol: str, months_back: int = 2, period: int = 21) -> float | None:
+    """計算「N個月前」當下的混合動能分數，用於檢查標的動能是否比過去更差（真的在退步）。
+
+    重用 calculate_momentum_with_rsi 的定義（50%短期21天 + 50%長期252天），
+    只是把資料截到 N個月前 為止再計算。用於 ROTATE 賣出端「自身動能衰退確認」
+    （回測見 research/_rotate_decel_backtest.py：2個月回看，whipsaw 事件 4→1，報酬不變）。
+
+    Args:
+        symbol: 股票代碼
+        months_back: 回看幾個月前（≈21個交易日/月）
+        period: 短期動能回看天數，需與當下動能計算一致
+
+    Returns:
+        動能分數（%），資料不足（如新股）時回傳 None，呼叫端應 fallback 為不擋
+    """
+    LONG_PERIOD = 252
+    SHORT_WEIGHT = 0.5
+    LONG_WEIGHT = 0.5
+    TRADING_DAYS_PER_MONTH = 21
+
+    try:
+        df = yf.Ticker(symbol).history(period="3y")
+        if "Close" not in df:
+            return None
+        df = df.dropna(subset=["Close"])
+
+        offset = months_back * TRADING_DAYS_PER_MONTH
+        cutoff = len(df) - offset
+        if cutoff < max(period, 20) + 1:
+            return None  # 資料不足以回推 N 個月前（新股常見）
+        df_cut = df.iloc[:cutoff]
+
+        df_short = df_cut.tail(period + 1)
+        momentum_short = (df_short['Close'].iloc[-1] / df_short['Close'].iloc[0] - 1) * 100
+
+        if len(df_cut) >= LONG_PERIOD + 1:
+            df_long = df_cut.tail(LONG_PERIOD + 1)
+            momentum_long = (df_long['Close'].iloc[-1] / df_long['Close'].iloc[0] - 1) * 100
+            momentum = SHORT_WEIGHT * momentum_short + LONG_WEIGHT * momentum_long
+        else:
+            momentum = momentum_short
+
+        return round(momentum, 2)
+    except Exception:
+        return None
+
+
 def calculate_momentum(symbol: str, period: int = 21) -> float | None:
     """計算單一標的的動能分數（過去N天報酬%）
 
@@ -100,7 +153,10 @@ def calculate_momentum(symbol: str, period: int = 21) -> float | None:
     """
     try:
         df = yf.Ticker(symbol).history(period=f"{period + 10}d")
-        if df.empty or len(df) < period:
+        if "Close" not in df:
+            return None
+        df = df.dropna(subset=["Close"])
+        if len(df) < period + 1:
             return None
 
         # 取最近 period 天
@@ -242,6 +298,11 @@ def calculate_alpha_1y(symbol: str, benchmark: str = "SPY") -> float | None:
         sym_df = yf.Ticker(symbol).history(period="1y")
         bench_df = yf.Ticker(benchmark).history(period="1y")
 
+        if "Close" not in sym_df or "Close" not in bench_df:
+            return None
+        sym_df = sym_df.dropna(subset=["Close"])
+        bench_df = bench_df.dropna(subset=["Close"])
+
         if sym_df.empty or bench_df.empty or len(sym_df) < 200 or len(bench_df) < 200:
             return None
 
@@ -266,6 +327,11 @@ def calculate_alpha_3y(symbol: str, benchmark: str = "SPY") -> float | None:
     try:
         sym_df = yf.Ticker(symbol).history(period="3y")
         bench_df = yf.Ticker(benchmark).history(period="3y")
+
+        if "Close" not in sym_df or "Close" not in bench_df:
+            return None
+        sym_df = sym_df.dropna(subset=["Close"])
+        bench_df = bench_df.dropna(subset=["Close"])
 
         if sym_df.empty or bench_df.empty or len(sym_df) < 600 or len(bench_df) < 600:
             return None
@@ -345,7 +411,10 @@ def calculate_trend_state(symbol: str) -> dict | None:
     """
     try:
         df = yf.Ticker(symbol).history(period="3mo")
-        if df.empty or len(df) < 20:
+        if "Close" not in df:
+            return None
+        df = df.dropna(subset=["Close"])
+        if len(df) < 20:
             return None
 
         closes_20d = df['Close'].iloc[-20:]
@@ -383,6 +452,63 @@ def calculate_trend_state(symbol: str) -> dict | None:
         return result
     except Exception:
         return None
+
+
+# ── A頭（倒V）型態偵測 ──────────────────────────────────────────────────────
+# 回測基礎（2019-2026，S&P500 高動能股，21日後中位報酬差距）：
+#   有明顯拖累：房地產 -7.20%、工業 -1.18%、能源 -1.09%、通訊 -0.70%
+#   無影響或正面：科技 +1.17%、原物料 +4.81%、金融/醫療/消費/公用事業 中性
+A_TOP_WINDOW       = 21
+A_TOP_SPIKE_PCT    = 0.12   # 窗口起點到峰值 ≥ +12%
+A_TOP_REVERSAL_PCT = 0.12   # 當前距峰值 ≤ -12%
+A_TOP_PEAK_BUFFER  = 5      # 峰值不能在窗口末尾 5 天內
+A_TOP_DRAG_SECTORS = {"房地產", "工業", "能源", "通訊"}
+
+
+def detect_a_top(prices: pd.Series) -> bool:
+    """偵測 A頭（倒V）型態：窗口內出現明顯拉升後已明顯回落"""
+    if len(prices) < A_TOP_WINDOW:
+        return False
+    recent = prices.iloc[-A_TOP_WINDOW:]
+    peak_idx = int(recent.values.argmax())
+    if peak_idx >= A_TOP_WINDOW - A_TOP_PEAK_BUFFER:
+        return False
+    peak_price  = float(recent.iloc[peak_idx])
+    start_price = float(recent.iloc[0])
+    curr_price  = float(recent.iloc[-1])
+    spike    = (peak_price - start_price) / start_price
+    reversal = (curr_price  - peak_price)  / peak_price
+    return spike >= A_TOP_SPIKE_PCT and reversal <= -A_TOP_REVERSAL_PCT
+
+
+def detect_a_top_batch(symbols: list, max_workers: int = 10) -> dict:
+    """批次偵測 A頭型態
+
+    Returns:
+        dict: {symbol: {"is_a_top": bool, "peak_price": float | None}}
+    """
+    def fetch_one(sym):
+        try:
+            df = yf.Ticker(sym).history(period="2mo")
+            if "Close" not in df:
+                return sym, {"is_a_top": False, "peak_price": None}
+            df = df.dropna(subset=["Close"])
+            if len(df) < A_TOP_WINDOW:
+                return sym, {"is_a_top": False, "peak_price": None}
+            closes = df["Close"]
+            is_a = detect_a_top(closes)
+            peak_price = float(closes.iloc[-A_TOP_WINDOW:].max()) if is_a else None
+            return sym, {"is_a_top": is_a, "peak_price": peak_price}
+        except Exception:
+            return sym, {"is_a_top": False, "peak_price": None}
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_one, sym): sym for sym in symbols}
+        for future in as_completed(futures):
+            sym, data = future.result()
+            results[sym] = data
+    return results
 
 
 def calculate_trend_state_batch(symbols: list, max_workers: int = 10) -> dict:
