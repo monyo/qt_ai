@@ -151,6 +151,67 @@ class GmailNotifier:
   {cards}
 </div>'''
 
+    def _format_value_pool_html(self, data):
+        """產生價值實驗池 HTML 區段（真金白銀前瞻實驗，資料已由 premarket_main.py 算好，這裡只負責渲染）"""
+        snapshot = data.get("value_pool_snapshot", [])
+        value_actions = data.get("value_actions", [])
+        if not snapshot and not value_actions:
+            return ""
+
+        exits = [a for a in value_actions if a["action"] == "VALUE_EXIT"]
+        adds  = [a for a in value_actions if a["action"] == "VALUE_ADD" and a.get("status") == "pending"]
+
+        rows = ""
+        for s in snapshot:
+            pnl = s.get("pnl_pct")
+            spy = s.get("spy_return_pct")
+            alpha = pnl - spy if pnl is not None and spy is not None else None
+            pnl_color = "#28a745" if (pnl or 0) >= 0 else "#dc3545"
+            alpha_str = f'<span style="color:{"#28a745" if (alpha or 0) >= 0 else "#dc3545"};">{alpha:+.1f}%</span>' if alpha is not None else "—"
+            rows += (f'<tr><td style="padding:3px 8px;font-weight:bold;">{s["symbol"]}</td>'
+                     f'<td style="padding:3px 8px;">{s["shares"]} 股 @ ${s["avg_price"]:.2f}</td>'
+                     f'<td style="padding:3px 8px;">${s["current_price"]:.2f}</td>'
+                     f'<td style="padding:3px 8px;color:{pnl_color};">{pnl:+.1f}%</td>'
+                     f'<td style="padding:3px 8px;">{alpha_str}</td>'
+                     f'<td style="padding:3px 8px;">{s.get("entry_date","")}</td></tr>')
+
+        exit_str = f'<p style="margin:4px 0;color:#dc3545;">⚠️ 出場觸發: {", ".join(a["symbol"] + "（" + a["reason"] + "）" for a in exits)}</p>' if exits else ""
+        add_str = ""
+        if adds:
+            add_lines = ", ".join(f'{a["symbol"]}（上檔 +{a.get("upside_pct")}%）' for a in adds)
+            add_str = f'<p style="margin:4px 0;color:#0d6efd;">💡 新候選（待質化分析）: {add_lines}</p>'
+
+        # 已平倉歷史勝率摘要
+        history_str = ""
+        try:
+            import json as _json
+            if os.path.exists("data/value_pool_log.json"):
+                with open("data/value_pool_log.json") as f:
+                    closed_log = _json.load(f)
+                alphas = [r["alpha_pct"] for r in closed_log if r.get("alpha_pct") is not None]
+                if alphas:
+                    wins = [a for a in alphas if a > 0]
+                    history_str = (f'<p style="margin:4px 0;font-size:12px;color:#6c757d;">'
+                                    f'已結束 {len(closed_log)} 筆，平均超額報酬 {sum(alphas)/len(alphas):+.1f}%，'
+                                    f'勝率 {len(wins)/len(alphas)*100:.0f}%</p>')
+        except Exception:
+            pass
+
+        table_html = (
+            f'<table style="border-collapse:collapse;width:100%;font-size:12px;margin-top:6px;">'
+            f'<tr style="background:#f3e9ff;"><th style="padding:3px 8px;text-align:left;">代碼</th>'
+            f'<th style="text-align:left;">持股</th><th style="text-align:left;">現價</th>'
+            f'<th>P&L</th><th>vs SPY</th><th style="text-align:left;">進場日</th></tr>{rows}</table>'
+            if rows else '<p style="margin:4px 0;font-size:12px;color:#6c757d;">（目前無持倉）</p>'
+        )
+
+        return (
+            f'<div style="background:#f9f0ff;padding:10px 14px;border-radius:6px;margin:12px 0;border-left:4px solid #9b59b6;">'
+            f'<strong>💎 價值實驗池</strong>（真金白銀前瞻實驗，最多 5 檔）'
+            f'{table_html}{exit_str}{add_str}{history_str}'
+            f'</div>'
+        )
+
     def _format_summary_html(self, data, qualitative_data=None):
         """產生簡短摘要 HTML（email 本文）"""
         portfolio = data.get("portfolio_snapshot", {})
@@ -303,6 +364,7 @@ class GmailNotifier:
                 + '</div>'
             )
 
+        value_html = self._format_value_pool_html(data)
         qual_html = self._format_qualitative_html(qualitative_data)
 
         return f'''<html>
@@ -325,6 +387,7 @@ class GmailNotifier:
   {qual_html}
   {hold_html}
   {tw_section_html}
+  {value_html}
 
   <p style="color:#aaa;font-size:11px;margin-top:20px;">📎 完整持倉表、建議詳情請見附件 PDF</p>
   <hr style="border:none;border-top:1px solid #eee;margin:12px 0;">
@@ -1145,6 +1208,7 @@ class GmailNotifier:
             {topups_html}
             {tw_portfolio_html}
             {tw_stocks_html}
+            {self._format_value_pool_html(data)}
 
             {self._format_qualitative_html(qualitative_data)}
 

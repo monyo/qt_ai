@@ -3,6 +3,7 @@ import json
 import math
 import os
 from datetime import datetime, date
+from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
@@ -12,7 +13,7 @@ from src.portfolio import (
     load_watchlist, save_watchlist, add_to_watchlist,
     update_high_prices, initialize_high_prices,
 )
-from src.data_loader import get_sp500_tickers, fetch_current_prices, fetch_volumes, get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map
+from src.data_loader import get_sp500_tickers, fetch_current_prices, fetch_volumes, get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map, get_earnings_days_batch, get_fundamentals_batch
 from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
 from src.risk import (check_position_limit, TRANCHE_PARAMS, update_dynamic_trailing,
                       update_winner_cycle_highs, check_winner_cycle_exits,
@@ -24,11 +25,14 @@ from src.sector_monitor import get_sector_summary, check_holdings_sector_exposur
 from src.market_environment import get_market_environment
 from src.ml_scorer import MLScorer
 from src.snapshot import load_snapshot, calculate_yearly_pnl, create_year_start_snapshot, save_snapshot
-from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_alpha_3y_batch, calculate_trend_state_batch
+from src.momentum import rank_by_momentum, print_momentum_report, calculate_alpha_batch, calculate_alpha_3y_batch, calculate_trend_state_batch, detect_a_top_batch, A_TOP_DRAG_SECTORS
 from src.notifier import GmailNotifier
 from src.wave_scanner import scan_waves
 from src.breadth_monitor import get_breadth_status
 from src.deviation_tracker import print_deviation_report
+from src.value_pool import (
+    VALUE_POOL_MAX, screen_value_candidates, check_value_exits, check_value_graduation,
+)
 
 
 def get_spy_regime():
@@ -803,6 +807,257 @@ def run_premarket(scan_tw=False, send_email=True):
             action["buy_sector"] = sector_map.get(action["buy_symbol"])
             action["sell_sector"] = sector_map.get(action["sell_symbol"])
 
+    # 5.85 A頭型態偵測（只針對 ADD/ROTATE 換入目標，數量少不影響速度）
+    # 邏輯：A頭出現代表尚未到底，等低點進場期望值更高，直接從建議清單移除
+    _a_top_syms = list({
+        a["symbol"] for a in actions if a["action"] == "ADD"
+    } | {
+        a["buy_symbol"] for a in actions if a["action"] == "ROTATE"
+    })
+    a_top_map = detect_a_top_batch(_a_top_syms) if _a_top_syms else {}
+
+    # 過濾掉 A頭標的（進入 watch 名單，等底部確認再回來）
+    suppressed_a_top = set()
+    filtered_actions = []
+    for action in actions:
+        if action["action"] == "ADD":
+            sym = action["symbol"]
+            if a_top_map.get(sym, {}).get("is_a_top"):
+                suppressed_a_top.add(sym)
+                continue  # 移除，不列入建議
+        elif action["action"] == "ROTATE":
+            buy_sym = action["buy_symbol"]
+            if a_top_map.get(buy_sym, {}).get("is_a_top"):
+                suppressed_a_top.add(buy_sym)
+                continue  # 換入目標有 A頭，整筆 ROTATE 暫停
+        filtered_actions.append(action)
+    actions = filtered_actions
+
+    # 5.855 財報鄰近暫緩（只針對 ADD/ROTATE 新建倉/換股，EXIT 停損維持機械化不受影響）
+    # 邏輯：財報是二元事件，新建倉或換股沒有急迫性時沒必要在公布前幾天承擔跳空風險，
+    # 等結果出來再決定；EXIT/Winner Cycle 出場是價格觸發的紀律動作，不受財報時間影響。
+    EARNINGS_BLACKOUT_DAYS = 3  # 財報公布日往前 N 天內暫緩
+
+    _earnings_syms = list({
+        a["symbol"] for a in actions if a["action"] == "ADD"
+    } | {
+        a["buy_symbol"] for a in actions if a["action"] == "ROTATE"
+    } | {
+        a["sell_symbol"] for a in actions if a["action"] == "ROTATE"
+    })
+    earnings_map = get_earnings_days_batch(_earnings_syms) if _earnings_syms else {}
+
+    suppressed_earnings = []  # 給報告用：[(symbol, action_desc, date, days)]
+    filtered_actions = []
+    for action in actions:
+        if action["action"] == "ADD":
+            sym = action["symbol"]
+            info = earnings_map.get(sym)
+            if info and info["days"] <= EARNINGS_BLACKOUT_DAYS:
+                suppressed_earnings.append((sym, f"ADD {sym}", info["date"], info["days"]))
+                continue  # 財報將至，暫緩新建倉
+        elif action["action"] == "ROTATE":
+            buy_sym, sell_sym = action["buy_symbol"], action["sell_symbol"]
+            buy_info, sell_info = earnings_map.get(buy_sym), earnings_map.get(sell_sym)
+            if buy_info and buy_info["days"] <= EARNINGS_BLACKOUT_DAYS:
+                suppressed_earnings.append((buy_sym, f"ROTATE 換入 {buy_sym}", buy_info["date"], buy_info["days"]))
+                continue  # 換入目標財報將至，整筆 ROTATE 暫停
+            if sell_info and sell_info["days"] <= EARNINGS_BLACKOUT_DAYS:
+                suppressed_earnings.append((sell_sym, f"ROTATE 賣出 {sell_sym}", sell_info["date"], sell_info["days"]))
+                continue  # 賣出標的財報將至，暫緩換股避免錯過財報表現
+        filtered_actions.append(action)
+    actions = filtered_actions
+
+    # 5.86 A頭追蹤名單（偵測到就記錄，每日追蹤是否站回峰值）
+    A_TOP_WATCH_PATH   = Path("data/a_top_watch.json")
+    A_TOP_NEAR_THRESH  = 0.92  # 距峰值 -8% 以內 = 接近站回
+    A_TOP_FULL_THRESH  = 0.98  # 距峰值 -2% 以內 = 視為已站回
+    A_TOP_EXPIRE_DAYS  = 180   # 追蹤期限（日曆天）
+
+    a_top_watch = {}
+    if A_TOP_WATCH_PATH.exists():
+        with open(A_TOP_WATCH_PATH) as f:
+            a_top_watch = json.load(f)
+
+    today_str = date.today().isoformat()
+
+    # 新增今日偵測到的 A頭（ADD + ROTATE 換入目標）
+    for sym, info in a_top_map.items():
+        if info.get("is_a_top") and info.get("peak_price") and sym not in a_top_watch:
+            a_top_watch[sym] = {
+                "peak_price":    round(info["peak_price"], 2),
+                "detected_date": today_str,
+                "sector":        sector_map.get(sym, ""),
+            }
+
+    # 檢查恢復狀況（需要非 ADD 候選池的當前價格時，補抓）
+    extra_syms = [s for s in a_top_watch if s not in current_prices]
+    extra_prices = fetch_current_prices(extra_syms) if extra_syms else {}
+
+    a_top_recovery_alerts = []   # 給報告用
+    to_remove = []
+    for sym, entry in a_top_watch.items():
+        detected_date = date.fromisoformat(entry["detected_date"])
+        if (date.today() - detected_date).days > A_TOP_EXPIRE_DAYS:
+            to_remove.append(sym)
+            continue
+        curr = current_prices.get(sym) or extra_prices.get(sym)
+        if not curr:
+            continue
+        peak  = entry["peak_price"]
+        ratio = curr / peak
+        days_since = (date.today() - detected_date).days
+        if ratio >= A_TOP_FULL_THRESH:
+            a_top_recovery_alerts.append({
+                "sym": sym, "sector": entry.get("sector", ""),
+                "peak": peak, "curr": curr,
+                "from_peak_pct": (ratio - 1) * 100,
+                "days_since": days_since,
+                "status": "✅ 已站回",
+            })
+            to_remove.append(sym)
+        elif ratio >= A_TOP_NEAR_THRESH:
+            a_top_recovery_alerts.append({
+                "sym": sym, "sector": entry.get("sector", ""),
+                "peak": peak, "curr": curr,
+                "from_peak_pct": (ratio - 1) * 100,
+                "days_since": days_since,
+                "status": "🟡 接近站回",
+            })
+
+    for sym in to_remove:
+        a_top_watch.pop(sym, None)
+
+    with open(A_TOP_WATCH_PATH, "w") as f:
+        json.dump(a_top_watch, f, indent=2, ensure_ascii=False)
+
+    # 5.87 價值實驗池（獨立於主動能邏輯，最多 VALUE_POOL_MAX 檔，真金白銀前瞻實驗，不影響主池 actions）
+    VALUE_POOL_LOG_PATH = Path("data/value_pool_log.json")
+
+    def _spy_return_pct(entry_date_str):
+        """entry_date 至今的 SPY 報酬%，供價值池 alpha 對比用"""
+        try:
+            spy_hist = yf.Ticker("SPY").history(start=entry_date_str, auto_adjust=True)
+            closes = spy_hist["Close"].dropna()
+            if len(closes) < 2:
+                return None
+            return round((closes.iloc[-1] / closes.iloc[0] - 1) * 100, 2)
+        except Exception:
+            return None
+
+    def _append_value_pool_log(record):
+        log = []
+        if VALUE_POOL_LOG_PATH.exists():
+            try:
+                with open(VALUE_POOL_LOG_PATH) as f:
+                    log = json.load(f)
+            except Exception:
+                log = []
+        log.append(record)
+        with open(VALUE_POOL_LOG_PATH, "w") as f:
+            json.dump(log, f, indent=2, ensure_ascii=False)
+
+    value_positions = portfolio.get("value_positions", {})
+    value_actions = []
+    value_graduated = []
+
+    if value_positions:
+        value_syms = list(value_positions.keys())
+        value_current_prices = fetch_current_prices(value_syms)
+        value_fundamentals_now = get_fundamentals_batch(value_syms)
+
+        # 畢業檢查（動能轉強、雙 alpha 合格 → 內部轉籍進主池，不是真實交易，不經過 confirm）
+        momentum_rank_map = {m["symbol"]: i + 1 for i, m in enumerate(momentum_ranks)}
+        graduates = check_value_graduation(value_positions, momentum_rank_map, alpha_1y_map, alpha_3y_map)
+        for sym in graduates:
+            pos = value_positions[sym]
+            price = value_current_prices.get(sym, pos["avg_price"])
+            pnl_pct = round((price / pos["avg_price"] - 1) * 100, 2) if pos.get("avg_price") else None
+            spy_ret = _spy_return_pct(pos.get("entry_date"))
+            _append_value_pool_log({
+                "symbol": sym, "entry_date": pos.get("entry_date"), "entry_price": pos.get("avg_price"),
+                "exit_date": today_str, "exit_price": price, "shares": pos.get("shares"),
+                "pnl_pct": pnl_pct, "spy_return_pct": spy_ret,
+                "alpha_pct": round(pnl_pct - spy_ret, 2) if pnl_pct is not None and spy_ret is not None else None,
+                "exit_reason": "graduated",
+            })
+            # 轉籍進主池：動能已轉強，重用既有停損機制（標準批次）
+            portfolio.setdefault("positions", {})[sym] = {
+                "shares": pos["shares"],
+                "avg_price": pos["avg_price"],
+                "cost_basis": pos.get("cost_basis", pos["avg_price"] * pos["shares"]),
+                "first_entry": pos.get("entry_date", today_str),
+                "high_since_entry": price,
+                "core": False,
+                "tranches": [{
+                    "n": 1, "shares": pos["shares"], "entry_price": pos["avg_price"],
+                    "entry_date": pos.get("entry_date", today_str), "high": price,
+                    "stop_type": "standard",
+                }],
+            }
+            value_positions.pop(sym, None)
+            value_graduated.append(sym)
+        portfolio["value_positions"] = value_positions
+
+        # 出場檢查（真實交易 → 進 value_actions，需 confirm）
+        value_exits = check_value_exits(value_positions, value_current_prices, value_fundamentals_now)
+        for sym, exit_info in value_exits.items():
+            pos = value_positions[sym]
+            value_actions.append({
+                "action": "VALUE_EXIT", "symbol": sym, "shares": pos["shares"],
+                "current_price": exit_info["current_price"], "avg_price": pos["avg_price"],
+                "reason": exit_info["reason"], "detail": exit_info["detail"], "status": "pending",
+            })
+
+    slots = VALUE_POOL_MAX - len(value_positions) + len(value_graduated)
+    if slots > 0:
+        momentum_map = {m["symbol"]: m.get("momentum", 0) for m in momentum_ranks}
+        # 先用便宜的動能/alpha 過濾縮小候選（避免對整個 S&P500 抓 yf.Ticker().info）
+        held_all = set(positions) | set(value_positions)
+        low_momentum_syms = [
+            m["symbol"] for m in momentum_ranks
+            if m["symbol"] not in held_all and m.get("momentum", 0) <= 0
+        ]
+        # 動能越接近轉正（跌幅較淺）越可能是「還沒起漲」而非「結構性衰退」，優先評估
+        low_momentum_syms.sort(key=lambda s: momentum_map.get(s, -999), reverse=True)
+        value_screen_pool = low_momentum_syms[:80]  # 控制 alpha/fundamentals 抓取成本
+
+        value_alpha_3y_map = calculate_alpha_3y_batch(value_screen_pool)
+        alpha_ok_pool = [s for s in value_screen_pool if (value_alpha_3y_map.get(s) or -999) >= -20.0][:50]
+
+        value_fundamentals = get_fundamentals_batch(alpha_ok_pool) if alpha_ok_pool else {}
+        value_screen_prices = fetch_current_prices(alpha_ok_pool) if alpha_ok_pool else {}
+
+        value_candidates = screen_value_candidates(
+            alpha_ok_pool, momentum_map, value_alpha_3y_map, value_fundamentals,
+            value_screen_prices, held_all, slots,
+        )
+        for cand in value_candidates:
+            value_actions.append({
+                "action": "VALUE_ADD", "symbol": cand["symbol"],
+                "current_price": value_screen_prices.get(cand["symbol"]),
+                "forward_pe": cand["forward_pe"], "peg": cand["peg"],
+                "target_mean": cand["target_mean"], "upside_pct": cand["upside_pct"],
+                "revenue_growth": cand["revenue_growth"], "sector": cand["sector"],
+                "alpha_3y": cand["alpha_3y"], "status": "pending",
+            })
+
+    value_pool_snapshot = []
+    for sym, pos in value_positions.items():
+        price = value_current_prices.get(sym, pos["avg_price"])
+        pnl_pct = round((price / pos["avg_price"] - 1) * 100, 2) if pos.get("avg_price") else None
+        value_pool_snapshot.append({
+            "symbol": sym,
+            "shares": pos["shares"],
+            "avg_price": pos["avg_price"],
+            "current_price": price,
+            "entry_date": pos.get("entry_date"),
+            "pnl_pct": pnl_pct,
+            "spy_return_pct": _spy_return_pct(pos.get("entry_date")),
+        })
+
+    save_portfolio(portfolio)
+
     # 6. 計算投組總值
     total_value = portfolio.get("cash", 0)
     for symbol, pos in positions.items():
@@ -865,9 +1120,11 @@ def run_premarket(scan_tw=False, send_email=True):
             "regime_note":  market_env.get("regime_note"),
         },
         "triple_warning": _triple,
+        "value_actions": value_actions,
+        "value_pool_snapshot": value_pool_snapshot,
     }
 
-    actions_path = f"data/actions_{today_str}.json"
+    actions_path = f"data/actions_{date.today().strftime('%Y%m%d')}.json"
     with open(actions_path, "w", encoding="utf-8") as f:
         json.dump(actions_output, f, indent=2, ensure_ascii=False)
 
@@ -1211,6 +1468,66 @@ def run_premarket(scan_tw=False, send_email=True):
             print(f"       動能差: +{a['momentum_diff']:.0f}%  {a['reason']}")
             print()
 
+    # A頭追蹤回報（接近/已站回峰值提醒）
+    if a_top_recovery_alerts:
+        print("--- A頭追蹤：站回提醒 ---")
+        for r in a_top_recovery_alerts:
+            sector_tag = f"[{r['sector']}]" if r["sector"] else ""
+            print(f"  {r['status']}  {r['sym']}{sector_tag}  "
+                  f"峰值 ${r['peak']:.2f}  當前 ${r['curr']:.2f}  "
+                  f"距高 {r['from_peak_pct']:+.1f}%  "
+                  f"（偵測後 {r['days_since']} 天）")
+        if a_top_watch:
+            print(f"  （追蹤中：{len(a_top_watch)} 支尚未站回，"
+                  f"站回定義：距峰值 -2% 以內）")
+        print()
+
+    # 財報將至暫緩清單
+    if suppressed_earnings:
+        print(f"--- 📅 財報將至，暫緩以下建議（{EARNINGS_BLACKOUT_DAYS} 天內公布）---")
+        for sym, desc, edate, edays in suppressed_earnings:
+            when = "明天" if edays == 1 else ("今天" if edays == 0 else f"{edays} 天後")
+            print(f"  ⏸ {desc}（{sym} 財報 {edate}，{when}公布）")
+        print("  （僅暫緩，非禁止：仍可自行決定是否執行，系統只是移除機械化建議）")
+        print()
+
+    # 💎 價值實驗池報告
+    value_exit_actions_r = [a for a in value_actions if a["action"] == "VALUE_EXIT"]
+    value_add_actions_r  = [a for a in value_actions if a["action"] == "VALUE_ADD"]
+    if value_pool_snapshot or value_exit_actions_r or value_add_actions_r or value_graduated:
+        print(f"--- 💎 價值實驗池（真金白銀前瞻實驗，最多 {VALUE_POOL_MAX} 檔）---")
+        if value_pool_snapshot:
+            print("  目前持倉:")
+            for s in value_pool_snapshot:
+                spy_r = s.get("spy_return_pct")
+                alpha_str = f"  vs SPY: {s['pnl_pct'] - spy_r:+.1f}%" if s["pnl_pct"] is not None and spy_r is not None else ""
+                print(f"    {s['symbol']}  {s['shares']}股 @ ${s['avg_price']:.2f} → ${s['current_price']:.2f}  "
+                      f"P&L: {s['pnl_pct']:+.1f}%{alpha_str}  (進場 {s['entry_date']})")
+        if value_graduated:
+            print(f"  🎓 畢業轉入主池（動能轉強，雙 alpha 合格）: {', '.join(value_graduated)}")
+        if value_exit_actions_r:
+            print("  出場觸發:")
+            for a in value_exit_actions_r:
+                print(f"    ⚠ {a['symbol']}  {a['reason']}  {a['detail']}")
+        if value_add_actions_r:
+            print("  新候選（待質化分析）:")
+            for a in value_add_actions_r:
+                print(f"    {a['symbol']}  forward PE {a.get('forward_pe')}  PEG {a.get('peg')}  "
+                      f"目標價 ${a.get('target_mean')}（上檔 +{a.get('upside_pct')}%）  [{a.get('sector')}]")
+        if VALUE_POOL_LOG_PATH.exists():
+            try:
+                with open(VALUE_POOL_LOG_PATH) as f:
+                    closed_log = json.load(f)
+                if closed_log:
+                    alphas = [r["alpha_pct"] for r in closed_log if r.get("alpha_pct") is not None]
+                    wins = [a for a in alphas if a > 0]
+                    if alphas:
+                        print(f"  已結束 {len(closed_log)} 筆，平均超額報酬 {sum(alphas)/len(alphas):+.1f}%，"
+                              f"勝率 {len(wins)/len(alphas)*100:.0f}%")
+            except Exception:
+                pass
+        print()
+
     # === 台股持倉管理（每次自動執行）===
     tw_actions = _run_tw_section(portfolio, actions_output)
     # 補存（含台股資料）
@@ -1281,7 +1598,7 @@ def run_premarket(scan_tw=False, send_email=True):
     rotate_actions = [a for a in actions if a["action"] == "ROTATE"]
     stop_reminders = _get_stop_update_reminders(portfolio, current_prices, vol_map=vol_map)
 
-    has_todo = exit_actions or stop_reminders or add_actions or rotate_actions or wc_reentry_adds
+    has_todo = exit_actions or stop_reminders or add_actions or rotate_actions or wc_reentry_adds or value_exit_actions_r
     if has_todo:
         width = 52
         print("╔" + "═" * width + "╗")
@@ -1310,8 +1627,16 @@ def run_premarket(scan_tw=False, send_email=True):
                     line = f"     {a['symbol']}  止損 ${stop_px:.2f}  反彈取消 ${rebound_px:.2f}"
                     print(f"║  {line:<{width-2}}║")
 
-        if stop_reminders:
+        if value_exit_actions_r:
             if exit_actions:
+                print("╠" + "─" * width + "╣")
+            print(f"║  {'💎 價值池 EXIT — 四層出場觸發':<{width-2}}║")
+            for a in value_exit_actions_r:
+                line = f"     {a['symbol']}  {a['shares']} 股 @ ${a.get('current_price', 0):.2f}  ({a['reason']})"
+                print(f"║  {line:<{width-2}}║")
+
+        if stop_reminders:
+            if exit_actions or value_exit_actions_r:
                 print("╠" + "─" * width + "╣")
             print(f"║  {'📌 停損單需更新（最緊批次先掛）':<{width-2}}║")
             for r in stop_reminders:
@@ -1321,7 +1646,7 @@ def run_premarket(scan_tw=False, send_email=True):
                 print(f"║  {line:<{width-2}}║")
 
         if rotate_actions:
-            if exit_actions or stop_reminders:
+            if exit_actions or stop_reminders or value_exit_actions_r:
                 print("╠" + "─" * width + "╣")
             print(f"║  {'🔄 ROTATE — 汰弱留強（擇機執行）':<{width-2}}║")
             for a in rotate_actions:

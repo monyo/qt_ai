@@ -2,6 +2,7 @@ from io import StringIO
 import yfinance as yf
 import pandas as pd
 import os
+import json
 import requests
 from datetime import datetime
 
@@ -97,6 +98,107 @@ def fetch_current_prices(symbols):
         except Exception as e:
             print(f"⚠ 無法取得 {symbol} 報價: {e}")
     return prices
+
+
+def get_earnings_days_batch(symbols):
+    """批次取得各標的「距下次財報公布還有幾天」
+
+    用 yfinance calendar 逐檔查詢（無批次 API），只給少量候選（ADD/ROTATE 相關標的）用，
+    數量少不影響速度。
+
+    Returns:
+        dict: {symbol: {"date": "YYYY-MM-DD", "days": int}}，只包含「未來」且成功查到日期的標的。
+        查無資料、日期是過去（yfinance 尚未更新下一季日期）、或發生例外的標的不會出現在結果中。
+    """
+    result = {}
+    today = datetime.now().date()
+    for symbol in symbols:
+        try:
+            cal = yf.Ticker(symbol).calendar
+            dates = cal.get("Earnings Date") if isinstance(cal, dict) else None
+            if not dates:
+                continue
+            future_dates = [d for d in dates if d >= today]
+            if not future_dates:
+                continue
+            next_date = min(future_dates)
+            result[symbol] = {
+                "date": next_date.isoformat(),
+                "days": (next_date - today).days,
+            }
+        except Exception:
+            continue
+    return result
+
+
+_FUNDAMENTALS_CACHE_PATH = "data/_fundamentals_cache.json"
+
+
+def get_fundamentals_batch(symbols, cache_days=7):
+    """批次取得基本面資料（本益比、PEG、分析師目標價等），供價值實驗池選股用
+
+    存到 data/_fundamentals_cache.json，超過 cache_days 天才重抓，
+    避免每天對 30-50 檔跑 yf.Ticker().info（約 0.6-0.9秒/檔，成本不低）。
+
+    Returns:
+        dict: {symbol: {pe, forward_pe, peg, target_mean, target_high, target_low,
+                         analyst_count, revenue_growth, sector, fetched_date}}
+        查無資料或發生例外的標的不會出現在結果中。
+    """
+    if not os.path.exists('data'):
+        os.makedirs('data')
+
+    cache = {}
+    if os.path.exists(_FUNDAMENTALS_CACHE_PATH):
+        try:
+            with open(_FUNDAMENTALS_CACHE_PATH, "r") as f:
+                cache = json.load(f)
+        except Exception:
+            cache = {}
+
+    today = datetime.now().date()
+    result = {}
+    dirty = False
+
+    for symbol in symbols:
+        cached = cache.get(symbol)
+        if cached:
+            try:
+                fetched_date = datetime.fromisoformat(cached["fetched_date"]).date()
+                if (today - fetched_date).days < cache_days:
+                    result[symbol] = cached
+                    continue
+            except Exception:
+                pass
+
+        try:
+            info = yf.Ticker(symbol).info
+            entry = {
+                "pe": info.get("trailingPE"),
+                "forward_pe": info.get("forwardPE"),
+                "peg": info.get("pegRatio") if info.get("pegRatio") is not None else info.get("trailingPegRatio"),
+                "target_mean": info.get("targetMeanPrice"),
+                "target_high": info.get("targetHighPrice"),
+                "target_low": info.get("targetLowPrice"),
+                "analyst_count": info.get("numberOfAnalystOpinions"),
+                "revenue_growth": info.get("revenueGrowth"),
+                "sector": info.get("sector"),
+                "fetched_date": today.isoformat(),
+            }
+            cache[symbol] = entry
+            result[symbol] = entry
+            dirty = True
+        except Exception as e:
+            print(f"⚠ 無法取得 {symbol} 基本面資料: {e}")
+
+    if dirty:
+        try:
+            with open(_FUNDAMENTALS_CACHE_PATH, "w") as f:
+                json.dump(cache, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"⚠ 無法寫入基本面快取: {e}")
+
+    return result
 
 
 def fetch_volumes(symbols):

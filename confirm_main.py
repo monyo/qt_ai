@@ -250,6 +250,121 @@ def run_confirm(date_str):
             save_portfolio(portfolio)
             print(f"🇹🇼 台股更新：現金 NT${portfolio.get('tw_cash', 0):,.0f}  持倉 {len(portfolio.get('tw_positions', {}))} 檔")
 
+    # ── 價值池確認 ──────────────────────────────────────────────
+    value_pending = [a for a in actions_data.get("value_actions", []) if a.get("status") == "pending"]
+    if value_pending:
+        print(f"\n=== 💎 價值池確認（{len(value_pending)} 筆，真金白銀）===\n")
+        portfolio = load_portfolio()
+        value_confirmed = []
+
+        for a in value_pending:
+            if a["action"] == "VALUE_EXIT":
+                print(f"VALUE_EXIT  {a['symbol']}  {a['shares']}股 @ ${a.get('current_price', 0):.2f}")
+                print(f"  原因: {a['reason']} — {a.get('detail', '')}")
+            elif a["action"] == "VALUE_ADD":
+                print(f"VALUE_ADD   {a['symbol']}  現價 ${a.get('current_price', 0):.2f}  "
+                      f"forward PE {a.get('forward_pe')}  PEG {a.get('peg')}  "
+                      f"目標價 ${a.get('target_mean')}（上檔 +{a.get('upside_pct')}%）")
+
+            if input("  確認執行？(y/n): ").strip().lower() == "y":
+                default_shares = a.get("shares", 0)
+                default_price  = a.get("current_price", 0)
+                s = input(f"  實際股數 [{default_shares}]: ").strip()
+                p = input(f"  成交價 [{default_price:.2f}]: ").strip()
+                a["actual_shares"] = int(s) if s else default_shares
+                a["actual_price"]  = float(p) if p else default_price
+                a["status"] = "confirmed"
+                a["confirm_date"] = today_str
+                value_confirmed.append(a)
+                print("  -> 已確認\n")
+            else:
+                a["status"] = "skipped"
+                print("  -> 已跳過\n")
+
+        with open(actions_path, "w", encoding="utf-8") as f:
+            json.dump(actions_data, f, indent=2, ensure_ascii=False)
+
+        if value_confirmed:
+            _apply_value_actions(portfolio, value_confirmed)
+            save_portfolio(portfolio)
+            print(f"💎 價值池更新：現金 ${portfolio.get('cash', 0):,.2f}  持倉 {len(portfolio.get('value_positions', {}))} 檔")
+
+
+def _apply_value_actions(portfolio, confirmed_actions):
+    today_str = str(date.today())
+    value_positions = portfolio.setdefault("value_positions", {})
+    value_transactions = portfolio.setdefault("value_transactions", [])
+
+    for a in confirmed_actions:
+        sym    = a["symbol"]
+        shares = a["actual_shares"]
+        price  = a["actual_price"]
+        if shares <= 0:
+            continue
+
+        if a["action"] == "VALUE_ADD":
+            cost = shares * price
+            if portfolio.get("cash", 0) < cost * 0.95:
+                print(f"  ⚠ 現金不足，跳過 {sym}")
+                continue
+            portfolio["cash"] = round(portfolio.get("cash", 0) - cost, 2)
+            if sym in value_positions:
+                pos = value_positions[sym]
+                total_shares = pos["shares"] + shares
+                pos["avg_price"]  = round((pos["avg_price"] * pos["shares"] + price * shares) / total_shares, 2)
+                pos["cost_basis"] = round(pos.get("cost_basis", 0) + cost, 2)
+                pos["shares"]     = total_shares
+            else:
+                value_positions[sym] = {
+                    "shares": shares, "avg_price": round(price, 2),
+                    "cost_basis": round(cost, 2), "entry_date": today_str,
+                    "entry_target_price": a.get("target_mean"),
+                    "entry_pe": a.get("forward_pe"), "entry_peg": a.get("peg"),
+                    "thesis": a.get("thesis", ""),
+                }
+            value_transactions.append({"date": today_str, "symbol": sym, "action": "BUY", "shares": shares, "price": price})
+
+        elif a["action"] == "VALUE_EXIT":
+            if sym not in value_positions:
+                continue
+            pos = value_positions[sym]
+            portfolio["cash"] = round(portfolio.get("cash", 0) + shares * price, 2)
+            value_transactions.append({"date": today_str, "symbol": sym, "action": "SELL", "shares": shares, "price": price})
+
+            pnl_pct = round((price / pos["avg_price"] - 1) * 100, 2) if pos.get("avg_price") else None
+            spy_return_pct = None
+            try:
+                import yfinance as yf
+                spy_hist = yf.Ticker("SPY").history(start=pos.get("entry_date"), auto_adjust=True)
+                closes = spy_hist["Close"].dropna()
+                if len(closes) >= 2:
+                    spy_return_pct = round((closes.iloc[-1] / closes.iloc[0] - 1) * 100, 2)
+            except Exception:
+                pass
+
+            log_path = "data/value_pool_log.json"
+            log = []
+            if os.path.exists(log_path):
+                try:
+                    with open(log_path) as f:
+                        log = json.load(f)
+                except Exception:
+                    log = []
+            log.append({
+                "symbol": sym, "entry_date": pos.get("entry_date"), "entry_price": pos.get("avg_price"),
+                "exit_date": today_str, "exit_price": price, "shares": shares,
+                "pnl_pct": pnl_pct, "spy_return_pct": spy_return_pct,
+                "alpha_pct": round(pnl_pct - spy_return_pct, 2) if pnl_pct is not None and spy_return_pct is not None else None,
+                "exit_reason": a.get("reason", "manual"),
+            })
+            with open(log_path, "w") as f:
+                json.dump(log, f, indent=2, ensure_ascii=False)
+
+            if shares >= pos["shares"]:
+                del value_positions[sym]
+            else:
+                pos["shares"] -= shares
+
 
 def _apply_tw_actions(portfolio, confirmed_actions):
     today_str = str(date.today())

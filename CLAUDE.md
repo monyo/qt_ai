@@ -104,6 +104,7 @@ Quantitative stock scanning + position management system. Combines technical ana
 | `wave_scanner.py` | 波浪偵測：量縮量增突破掃描 |
 | `notifier.py` | Gmail SMTP 通知。發送 HTML 摘要（本文）+ 完整 PDF（附件）|
 | `deviation_tracker.py` | 偏離成本追蹤。比較系統建議 vs 實際執行，量化「沒買的 ADD」和「延遲進場」的機會成本 |
+| `value_pool.py` | 價值實驗池（v0.11.0）。與主動能池相反的因子：篩選基本面便宜、動能還沒起來的標的，真金白銀前瞻實驗（無法回測，見下方說明） |
 
 ### Key design details
 
@@ -179,6 +180,16 @@ Quantitative stock scanning + position management system. Combines technical ana
 - **市場廣度**：S&P500 % 股票 > MA50，分 5 級（健康/偏弱/弱/危險/極危險），建議 ADD ≤ 對應支數
 - **市場環境**：VIX + WTI 油價（USO ETF）組合判斷 4 種體制，滯脹恐慌時能源族群 ML% 高
 - **ML% 評分**：XGBoost 預測「打敗 SPY 的機率」（>50% = 模型看好）。首次使用自動訓練（~3-5 分鐘），之後讀快取 <1 秒。不需每日重訓，建議每季更新一次（刪 `data/_ml_model.pkl` 強制重訓）
+- **價值實驗池（Value Experiment Pool）**（v0.11.0，`src/value_pool.py`，2026-09-02 上線）：
+  - **動機**：主池是純動能（強者恆強），刻意不做「低估但動能未起」的選股。此為相反因子的真金白銀前瞻實驗，**不做歷史回測**——yfinance 基本面（PE/PEG/目標價）只有「現在」快照，無 point-in-time 歷史資料，回測等於用未來函數騙自己
+  - **篩選**（`screen_value_candidates`）：動能 ≤0（主池看不上的）+ 3Y alpha > -20%（排除結構性衰退）+ forward PE < 25 + PEG < 1.5 + 分析師目標價上檔 > 15% + 營收成長 ≥0，按上檔空間排序，最多同時 5 檔，不設總金額上限（逐檔決定）
+  - **基本面快取**：`get_fundamentals_batch()`（`src/data_loader.py`）存 `data/_fundamentals_cache.json`，7 天內不重抓
+  - **四層出場**（`check_value_exits`，依序檢查、互斥）：硬停損 -20% → 停利（達目標價 90%）→ 基本面轉壞（目標價下修 >15%）→ 時間停損（6個月內 ±10% 盤整）
+  - **畢業機制**（`check_value_graduation`）：動能轉強到符合主池雙 alpha 門檻（1Y>0 且 3Y>-30%）且排名進前 50 → 內部轉籍進主池 `positions`（標準批次），不經過 confirm、不是真實交易，同時記一筆 `exit_reason="graduated"` 到 log
+  - **獨立持倉**：`portfolio.json` 的 `value_positions` / `value_transactions`，共用主池 `cash`（不另開資金池）
+  - **永久績效帳本**：`data/value_pool_log.json`，記錄每筆已平倉回合的 pnl% / 同期 SPY 報酬% / alpha%，用於長期驗證「打贏大盤了沒」
+  - **質化分析強制觸發**：`VALUE_ADD` 是質化分析的必做條件之一（`.claude/commands/premarket.md`），無例外——真金白銀新策略，把關比一般 ADD 更嚴
+  - **confirm 流程**：`confirm_main.py` 新增 `=== 💎 價值池確認 ===` 區塊（`_apply_value_actions`），比照台股確認模式，EXIT 確認時自動寫入 `value_pool_log.json`
 
 ## Portfolio Baseline (2026)
 
