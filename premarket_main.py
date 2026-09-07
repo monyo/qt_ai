@@ -45,10 +45,11 @@ def get_spy_regime():
     """
     try:
         df = yf.Ticker("SPY").history(period="1y")
-        if len(df) < 200:
+        closes = df["Close"].dropna() if "Close" in df else pd.Series(dtype=float)
+        if len(closes) < 200:
             return {"regime": "BULL", "is_bull": True, "spy_price": None, "ma200": None, "pct_vs_ma200": None}
-        spy_price = round(df["Close"].iloc[-1], 2)
-        ma200 = round(df["Close"].rolling(200).mean().iloc[-1], 2)
+        spy_price = round(float(closes.iloc[-1]), 2)
+        ma200 = round(float(closes.rolling(200).mean().iloc[-1]), 2)
         pct = round((spy_price - ma200) / ma200 * 100, 2)
         is_bull = bool(spy_price > ma200)
         return {
@@ -75,8 +76,9 @@ def fetch_ma200_prices(symbols):
     for symbol in symbols:
         try:
             df = yf.Ticker(symbol).history(period="1y")
-            if len(df) >= 200:
-                ma200 = df['Close'].rolling(200).mean().iloc[-1]
+            closes = df["Close"].dropna() if "Close" in df else pd.Series(dtype=float)
+            if len(closes) >= 200:
+                ma200 = closes.rolling(200).mean().iloc[-1]
                 if not pd.isna(ma200):
                     ma200_prices[symbol] = round(ma200, 2)
         except Exception:

@@ -64,11 +64,12 @@ def _get_return(symbol, days):
     try:
         # 多抓幾天確保有足夠交易日
         df = yf.Ticker(symbol).history(period=f"{days + 10}d")
-        if df.empty or len(df) < days:
+        closes = df["Close"].dropna() if "Close" in df else pd.Series(dtype=float)
+        if len(closes) < days + 1:
             return None
 
-        df = df.tail(days + 1)  # +1 因為要算 pct change
-        ret = (df['Close'].iloc[-1] / df['Close'].iloc[0] - 1)
+        closes = closes.tail(days + 1)  # +1 因為要算 pct change
+        ret = (closes.iloc[-1] / closes.iloc[0] - 1)
         return round(ret, 4)
     except Exception:
         return None

@@ -53,6 +53,9 @@ def get_stock_breadth() -> float | None:
     if close_df is None:
         return None
 
+    # Yahoo 偶爾會在最新日期只回傳部分股票，甚至整列 NaN。
+    # 各股票以前一筆有效收盤補齊，避免整體廣度誤判為不可用。
+    close_df = close_df.ffill()
     ma50     = close_df.rolling(_MA_WIN, min_periods=30).mean()
     curr     = close_df.iloc[-1]
     ma50_now = ma50.iloc[-1]
