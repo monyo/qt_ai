@@ -1063,6 +1063,8 @@ def run_premarket(scan_tw=False, send_email=True):
     for symbol, pos in positions.items():
         price = current_prices.get(symbol, pos["avg_price"])
         total_value += price * pos["shares"]
+    for s in value_pool_snapshot:
+        total_value += s["current_price"] * s["shares"]
 
     # 7. 載入年度快照並計算年度 P&L（用於儲存）
     current_year = date.today().year
