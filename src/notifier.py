@@ -3,6 +3,8 @@ import smtplib
 import os
 import datetime
 import pathlib
+from html import escape
+from urllib.parse import urlparse
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -116,6 +118,45 @@ class GmailNotifier:
         if not analyses:
             return ""
 
+        packets = {
+            packet.get("symbol"): packet
+            for packet in qualitative_data.get("research_packets", [])
+            if packet.get("symbol")
+        }
+
+        def structured_text(value, fields):
+            if isinstance(value, str):
+                return value
+            if isinstance(value, dict):
+                value = [value]
+            if not isinstance(value, list):
+                return ""
+            rendered = []
+            for item in value:
+                if isinstance(item, dict):
+                    details = [
+                        f"{label}：{item[key]}"
+                        for key, label in fields
+                        if item.get(key) not in (None, "")
+                    ]
+                    if details:
+                        rendered.append("；".join(details))
+                elif item not in (None, ""):
+                    rendered.append(str(item))
+            return "；".join(rendered)
+
+        def scenario_text(value):
+            if isinstance(value, dict):
+                assumptions = value.get("assumptions")
+                result = value.get("result")
+                details = []
+                if assumptions:
+                    details.append(f"假設：{assumptions}")
+                if result:
+                    details.append(f"結果：{result}")
+                return "，".join(details) or str(value)
+            return str(value)
+
         score_style = {
             "✅ 積極建議": ("background:#d4edda;border-left:4px solid #28a745;", "#155724"),
             "🟡 可考慮":   ("background:#fff3cd;border-left:4px solid #ffc107;", "#856404"),
@@ -128,18 +169,80 @@ class GmailNotifier:
             verdict = a.get("verdict", "⚠️ 等待")
             box_style, text_color = score_style.get(verdict, score_style["⚠️ 等待"])
             score = a.get("score", 50)
-            trigger = a.get("trigger", "")
+            packet = packets.get(a.get("symbol"), {})
+            trigger = a.get("trigger") or "；".join(packet.get("triggers", []))
+            strategy_type = a.get("strategy_type") or a.get("research_archetype")
+            strategy_html = f'<div>🧭 <strong>策略分類：</strong>{escape(str(strategy_type))}</div>' if strategy_type else ""
+            valuation = a.get("valuation")
+            valuation_html = f'<div>💰 <strong>估值：</strong>{escape(str(valuation))}</div>' if valuation else ""
+            momentum_state = a.get("momentum_state")
+            momentum_html = f'<div>📈 <strong>動能：</strong>{escape(str(momentum_state))}</div>' if momentum_state else ""
+            timing = a.get("timing")
+            timing_html = f'<div>⏱️ <strong>進場時機：</strong>{escape(str(timing))}</div>' if timing else ""
+            invalidation = a.get("invalidation") or structured_text(
+                a.get("invalidation_conditions"), ()
+            )
+            invalidation_html = f'<div>🛑 <strong>失效條件：</strong>{escape(str(invalidation))}</div>' if invalidation else ""
+            override = a.get("quant_action_override")
+            final_recommendation = a.get("final_recommendation")
+            override_html = f'<div>🔁 <strong>量化建議修正：</strong>{escape(str(override))}</div>' if override else ""
+            final_recommendation_html = f'<div>🎯 <strong>最終判斷：</strong>{escape(str(final_recommendation))}</div>' if final_recommendation else ""
+            catalyst = a.get("catalyst") or structured_text(
+                a.get("catalysts"),
+                (("event", "事件"), ("transmission", "傳導"), ("time_horizon", "期間"), ("confirmation_signal", "確認訊號")),
+            )
+            risk = a.get("risk") or structured_text(
+                a.get("risks"),
+                (("event", "事件"), ("financial_transmission", "財務傳導"), ("warning_signal", "警示訊號")),
+            )
+            recommendation = (
+                a.get("recommendation")
+                or a.get("position_guidance")
+                or final_recommendation
+            )
+            symbol = escape(str(a.get("symbol", "")))
+            evidence_links = []
+            for evidence in a.get("evidence", []):
+                source = evidence.get("source", "")
+                if not isinstance(source, str) or not source.startswith("https://"):
+                    continue
+                label = evidence.get("title") or urlparse(source).netloc
+                published_at = evidence.get("published_at", "")
+                link = f'<a href="{escape(source, quote=True)}">{escape(label)}</a>'
+                evidence_links.append(f'{link} ({escape(str(published_at))})' if published_at else link)
+            evidence_html = (
+                '<div>🔗 <strong>來源：</strong>' + "；".join(evidence_links) + '</div>'
+                if evidence_links else ""
+            )
+            thesis = a.get("core_thesis")
+            thesis_html = f'<div>🧠 <strong>核心論點：</strong>{escape(str(thesis))}</div>' if thesis else ""
+            counter_case = a.get("counter_case")
+            counter_case_html = f'<div>🛡️ <strong>反方論點：</strong>{escape(str(counter_case))}</div>' if counter_case else ""
+            scenarios = a.get("scenarios") or {}
+            scenario_html = ""
+            if scenarios:
+                scenario_html = '<div>📊 <strong>情境：</strong>' + "；".join(
+                    f'{escape(str(name))}：{escape(scenario_text(value))}'
+                    for name, value in scenarios.items()
+                ) + '</div>'
+            score_display = escape(str(score))
+            verdict_display = escape(str(verdict))
             cards += f'''
 <div style="{box_style}padding:10px 14px;border-radius:6px;margin:8px 0;">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-    <span style="font-weight:bold;font-size:15px;">{a['symbol']}</span>
-    <span style="color:{text_color};font-weight:bold;">{verdict} &nbsp; {score}/100</span>
-    <span style="color:#888;font-size:12px;">觸發: {trigger}</span>
+    <span style="font-weight:bold;font-size:15px;">{symbol}</span>
+    <span style="color:{text_color};font-weight:bold;">{verdict_display} &nbsp; {score_display}/100</span>
+    <span style="color:#888;font-size:12px;">觸發: {escape(str(trigger))}</span>
   </div>
   <div style="font-size:13px;line-height:1.6;">
-    <div>💡 <strong>催化劑：</strong>{a.get('catalyst', '—')}</div>
-    <div>⚠️ <strong>風險：</strong>{a.get('risk', '—')}</div>
-    <div>📌 <strong>建議：</strong>{a.get('recommendation', '—')}</div>
+    {strategy_html}{valuation_html}{momentum_html}{timing_html}
+    {thesis_html}
+    <div>💡 <strong>催化劑：</strong>{escape(str(catalyst or '—'))}</div>
+    <div>⚠️ <strong>風險：</strong>{escape(str(risk or '—'))}</div>
+    {counter_case_html}{scenario_html}
+    {invalidation_html}
+    <div>📌 <strong>建議：</strong>{escape(str(recommendation or '—'))}</div>
+    {override_html}{final_recommendation_html}{evidence_html}
   </div>
 </div>'''
 
@@ -178,7 +281,15 @@ class GmailNotifier:
         exit_str = f'<p style="margin:4px 0;color:#dc3545;">⚠️ 出場觸發: {", ".join(a["symbol"] + "（" + a["reason"] + "）" for a in exits)}</p>' if exits else ""
         add_str = ""
         if adds:
-            add_lines = ", ".join(f'{a["symbol"]}（上檔 +{a.get("upside_pct")}%）' for a in adds)
+            value_type_labels = {
+                "early_value": "Early Value",
+                "value_with_confirmation": "Value With Confirmation",
+            }
+            add_lines = ", ".join(
+                f'{a["symbol"]}（{value_type_labels.get(a.get("value_type"), "Value")}'
+                f'，動能 {a.get("momentum", 0):+.1f}% ，上檔 +{a.get("upside_pct")}%）'
+                for a in adds
+            )
             add_str = f'<p style="margin:4px 0;color:#0d6efd;">💡 新候選（待質化分析）: {add_lines}</p>'
 
         # 已平倉歷史勝率摘要
@@ -234,6 +345,11 @@ class GmailNotifier:
         else:
             pct = f"{regime.get('pct_vs_ma200', 0):.1f}%"
             regime_str = f'<span style="color:#dc3545;">🔴 BEAR SPY {pct} vs MA200</span>'
+        quote_date = data.get("quote_data_as_of")
+        quote_data_label = (
+            f"美股報價截至 {quote_date}" if quote_date
+            else "⚠ 美股報價日期未確認"
+        )
 
         # 板塊概況（一行）
         sector_html = ""
@@ -370,7 +486,7 @@ class GmailNotifier:
         return f'''<html>
 <body style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;padding:20px;color:#333;">
   <h2 style="margin-bottom:4px;">盤前報告 {data["date"]}</h2>
-  <p style="color:#6c757d;margin:0 0 12px;font-size:12px;">版本 {data.get("version", "N/A")} &nbsp;|&nbsp; {regime_str}</p>
+  <p style="color:#6c757d;margin:0 0 12px;font-size:12px;">版本 {data.get("version", "N/A")} &nbsp;|&nbsp; {regime_str} &nbsp;|&nbsp; {quote_data_label}</p>
 
   <div style="background:#f8f9fa;padding:12px 16px;border-radius:6px;margin-bottom:12px;font-size:13px;">
     <strong>投組總值: ${portfolio.get("total_value", 0):,.0f}</strong>
@@ -421,6 +537,8 @@ class GmailNotifier:
                 pct = f"{regime['pct_vs_ma200']:.1f}%" if regime.get("pct_vs_ma200") is not None else ""
                 lines.append(f"市場體制: 🔴 BEAR  SPY ${regime.get('spy_price')} < MA200 ${regime.get('ma200')} ({pct})")
                 lines.append("  ⚠️  ADD / ROTATE 已暫停，等 SPY 站回 MA200")
+        quote_date = data.get("quote_data_as_of")
+        lines.append(f"美股報價截至 {quote_date}" if quote_date else "⚠ 美股報價日期未確認")
         lines.append("")
 
         # 年度 P&L
@@ -659,6 +777,14 @@ class GmailNotifier:
             else:
                 pct = f"{regime['pct_vs_ma200']:.1f}%" if regime.get("pct_vs_ma200") is not None else ""
                 regime_html = f'<div style="background:#f8d7da;padding:10px;border-radius:5px;margin:10px 0;border-left:4px solid #dc3545;"><strong>🔴 市場體制: BEAR</strong> &nbsp; SPY ${regime.get("spy_price")} &lt; MA200 ${regime.get("ma200")} ({pct})<br><span style="color:#721c24;">⚠️ ADD / ROTATE 已暫停，等 SPY 站回 MA200 再開放新倉</span></div>'
+        quote_date = data.get("quote_data_as_of")
+        quote_date_text = f"美股報價截至 {quote_date}" if quote_date else "⚠ 美股報價日期未確認"
+        if regime_html:
+            regime_html = regime_html.replace(
+                "</div>",
+                f'<br><span style="font-size:12px;">{quote_date_text}</span></div>',
+                1,
+            )
 
         # 市場環境（VIX + 石油）
         menv = data.get("market_env", {})

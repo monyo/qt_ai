@@ -13,7 +13,10 @@ from src.portfolio import (
     load_watchlist, save_watchlist, add_to_watchlist,
     update_high_prices, initialize_high_prices,
 )
-from src.data_loader import get_sp500_tickers, fetch_current_prices, fetch_volumes, get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map, get_earnings_days_batch, get_fundamentals_batch
+from src.data_loader import (get_sp500_tickers, fetch_current_prices,
+                             fetch_current_prices_with_metadata, fetch_volumes,
+                             get_tw50_tickers, TW_STOCK_NAMES, get_sp500_sector_map,
+                             get_earnings_days_batch, get_fundamentals_batch)
 from src.tw_scanner import get_tw_liquid_tickers, scan_tw_market
 from src.risk import (check_position_limit, TRANCHE_PARAMS, update_dynamic_trailing,
                       update_winner_cycle_highs, check_winner_cycle_exits,
@@ -31,8 +34,11 @@ from src.wave_scanner import scan_waves
 from src.breadth_monitor import get_breadth_status
 from src.deviation_tracker import print_deviation_report
 from src.value_pool import (
-    VALUE_POOL_MAX, screen_value_candidates, check_value_exits, check_value_graduation,
+    VALUE_POOL_MAX, screen_value_candidates, screen_independent_fundamental_candidates,
+    prioritize_fundamental_screen_candidates,
+    check_value_exits, check_value_graduation,
 )
+from src.qualitative import collect_qualitative_candidates, generate_qualitative_data
 
 
 def get_spy_regime():
@@ -249,12 +255,18 @@ def _get_stop_update_reminders(portfolio, current_prices, vol_map=None):
 
 def _check_triple_warning(breadth_status, market_env, actions):
     """
-    三重警告：廣度偏弱 + 市場環境差 + ADD 候選 ML% 全面低迷。
+    市場級警告：廣度偏弱 + 市場環境差。
+
+    ADD 候選 ML% 低迷僅作為選股品質提示，不再參與市場級警告觸發。
+    這是因為 ML walk-forward 驗證尚未證明機率校準可靠，不能讓它單獨
+    將市場狀態升級為防守 regime。
+
     同時找出持倉中「動能轉負但尚未觸停損」的防禦性減倉候選。
 
     Returns dict:
         triggered           bool
-        conditions          list[str]
+        conditions          list[str]  市場級條件
+        candidate_quality_warning dict  ADD 候選 ML 品質提示
         defensive_candidates list[dict]  持倉弱勢標的
     """
     conditions = []
@@ -271,17 +283,25 @@ def _check_triple_warning(breadth_status, market_env, actions):
     if regime_emoji == "🔴":
         conditions.append(f"市場環境 {regime_label}（VIX + 油價雙升）")
 
-    # 條件 3：ADD 候選 ML% 平均 < 50%
+    # 選股品質提示：ADD 候選 ML% 平均 < 50%。
+    # 不納入市場級 triggered，避免未校準 ML 造成 false alert。
     add_probs = [
         a["ml_prob"] for a in actions
         if a["action"] == "ADD" and not a.get("is_backup") and a.get("ml_prob") is not None
     ]
+    candidate_quality_warning = {
+        "triggered": False,
+        "avg_ml_pct": None,
+        "sample_count": len(add_probs),
+    }
     if add_probs:
         avg_ml = sum(add_probs) / len(add_probs) * 100
-        if avg_ml < 50:
-            conditions.append(f"ADD 候選 ML% 平均 {avg_ml:.0f}%（< 50%，模型整體不看好）")
+        candidate_quality_warning.update({
+            "triggered": avg_ml < 50,
+            "avg_ml_pct": round(avg_ml, 1),
+        })
 
-    triggered = len(conditions) >= 2  # 至少兩項才觸發，避免過敏
+    triggered = len(conditions) >= 2  # 廣度 + 紅色市場環境才觸發
 
     # 防禦性減倉候選：已持有、動能 < 0 或趨勢轉弱、尚未在 EXIT 清單
     exit_syms = {a["symbol"] for a in actions if a["action"] == "EXIT"}
@@ -324,6 +344,7 @@ def _check_triple_warning(breadth_status, market_env, actions):
     return {
         "triggered":            triggered,
         "conditions":           conditions,
+        "candidate_quality_warning": candidate_quality_warning,
         "defensive_candidates": defensive,
     }
 
@@ -565,13 +586,105 @@ def _run_tw_section(portfolio, actions_output):
     return tw_actions
 
 
-def run_premarket(scan_tw=False, send_email=True):
+def _load_qualitative_data(qualitative_path):
+    """讀取當日質化分析；檔案不存在或損壞時回傳 None。"""
+    if not qualitative_path.exists():
+        print("（無當日質化分析檔，寄送原始報告）")
+        return None
+
+    try:
+        with qualitative_path.open(encoding="utf-8") as f:
+            qualitative_data = json.load(f)
+        print(f"載入質化分析：{len(qualitative_data.get('analyses', []))} 筆")
+        return qualitative_data
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"⚠ 質化分析檔讀取失敗，寄送原始報告：{e}")
+        return None
+
+
+def _ensure_qualitative_data(actions_output, qualitative_path, skip_qualitative=False):
+    """確保完整質化分析存在；明確略過時不呼叫模型、不寫空分析檔。"""
+    if skip_qualitative:
+        print("（--skip-qualitative：略過完整質化分析）")
+        return True
+
+    expected_symbols = {
+        item["symbol"] for item in collect_qualitative_candidates(actions_output)
+    }
+    existing_symbols = set()
+    existing_complete = False
+    if qualitative_path.exists():
+        try:
+            with qualitative_path.open(encoding="utf-8") as f:
+                analyses = json.load(f).get("analyses", [])
+                existing_symbols = {
+                    item.get("symbol") for item in analyses if item.get("symbol")
+                }
+                existing_complete = all(
+                    item.get("quant_action_override")
+                    and item.get("final_recommendation")
+                    and item.get("core_thesis")
+                    and item.get("counter_case")
+                    and isinstance(item.get("evidence"), list)
+                    and isinstance(item.get("invalidation_conditions"), list)
+                    for item in analyses
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if (
+        not qualitative_path.exists()
+        or not expected_symbols <= existing_symbols
+        or not existing_complete
+    ):
+        qualitative_data = generate_qualitative_data(actions_output)
+        if not qualitative_data:
+            print("⚠ 無法自動產生質化分析，停止寄送（完整報告必須包含質化分析）")
+            return False
+        with qualitative_path.open("w", encoding="utf-8") as f:
+            json.dump(qualitative_data, f, indent=2, ensure_ascii=False)
+        print(f"質化分析已儲存至: {qualitative_path}")
+
+    return True
+
+
+def _build_price_symbol_universe(top_symbols, held_symbols, watch_symbols=()):
+    """Include strategy candidates, holdings, and Winner Cycle watch symbols."""
+    return list(dict.fromkeys([*top_symbols, *held_symbols, *watch_symbols]))
+
+
+def _format_winner_cycle_watch_quote(price, low):
+    """Format a watch quote without treating a missing price as a real zero."""
+    try:
+        price_value = float(price)
+    except (TypeError, ValueError):
+        return "N/A", "N/A"
+    if not math.isfinite(price_value) or price_value <= 0:
+        return "N/A", "N/A"
+
+    price_text = f"${price_value:.2f}"
+    try:
+        low_value = float(low)
+    except (TypeError, ValueError):
+        return price_text, "N/A"
+    if not math.isfinite(low_value) or low_value <= 0:
+        return price_text, "N/A"
+
+    recovery_pct = (price_value / low_value - 1) * 100
+    return price_text, f"{recovery_pct:+.1f}%"
+
+
+def run_premarket(scan_tw=False, send_email=True, skip_qualitative=False):
     """產出盤前建議（動能策略 + 三層出場）
 
     Args:
         scan_tw: 是否掃描台股（預設 False）
         send_email: 是否發送 Email（預設 True，--no-email 時為 False）
+        skip_qualitative: 是否略過質化分析；啟用時也會停用 Email
     """
+    if skip_qualitative:
+        send_email = False
+
     os.makedirs("data", exist_ok=True)
     today_str = date.today().strftime("%Y%m%d")
 
@@ -620,9 +733,23 @@ def run_premarket(scan_tw=False, send_email=True):
 
     # 4. 取得報價（動能前 45 名 + 持倉，涵蓋主要候選+備選，緩衝持倉佔位）
     top_symbols = [m["symbol"] for m in momentum_ranks[:45]]
-    symbols_for_price = list(set(top_symbols + held_symbols))
+    wc_watch = load_winner_cycle_watch()
+    symbols_for_price = _build_price_symbol_universe(
+        top_symbols, held_symbols, wc_watch.keys(),
+    )
     print(f"正在取得 {len(symbols_for_price)} 檔報價...")
-    current_prices = fetch_current_prices(symbols_for_price)
+    current_prices, latest_valid_date, latest_observed_date = fetch_current_prices_with_metadata(symbols_for_price)
+    if (
+        latest_valid_date is not None
+        and latest_observed_date is not None
+        and latest_valid_date < latest_observed_date
+    ):
+        print(
+            f"⚠ 報價資料尚未更新：最後有效收盤日 {latest_valid_date}，"
+            f"資料源最新觀測日 {latest_observed_date}。"
+        )
+        print("盤前流程停止，不產生建議、不儲存報告、不寄送 Email。")
+        return
 
     # 4.5 取得持倉的 MA200 資料（用於出場判斷）
     print(f"正在取得 {len(held_symbols)} 檔持倉的 MA200...")
@@ -715,7 +842,6 @@ def run_premarket(scan_tw=False, send_email=True):
         except Exception:
             pass
     wc_exits = check_winner_cycle_exits(portfolio, current_prices, hist_prices=_wc_hist)
-    wc_watch = load_winner_cycle_watch()
     update_winner_cycle_watch_lows(wc_watch, current_prices)
     save_winner_cycle_watch(wc_watch)
     wc_reentries = check_winner_cycle_reentries(wc_watch, current_prices)
@@ -961,6 +1087,22 @@ def run_premarket(scan_tw=False, send_email=True):
     value_actions = []
     value_graduated = []
 
+    # 獨立於動能策略的 S&P 500 基本面初篩，供質化分析補充候選使用；
+    # 不用 3Y alpha、動能排名、RSI 或趨勢狀態作為篩選條件。
+    print("正在對 S&P 500 執行獨立基本面/估值初篩（不使用動能訊號）...")
+    fundamental_screen_fundamentals = get_fundamentals_batch(sp500)
+    fundamental_screen_prices = fetch_current_prices(sp500)
+    fundamental_screen_all_candidates = screen_independent_fundamental_candidates(
+        sp500, fundamental_screen_fundamentals, fundamental_screen_prices,
+    )
+    fundamental_screen_candidates = prioritize_fundamental_screen_candidates(
+        fundamental_screen_all_candidates, limit=20,
+    )
+    print(
+        f"  初篩符合 {len(fundamental_screen_all_candidates)} 檔；"
+        f"按基本面品質訊號排序取前 {len(fundamental_screen_candidates)} 檔併入質化分析"
+    )
+
     if value_positions:
         value_syms = list(value_positions.keys())
         value_current_prices = fetch_current_prices(value_syms)
@@ -1012,25 +1154,35 @@ def run_premarket(scan_tw=False, send_email=True):
     slots = VALUE_POOL_MAX - len(value_positions) + len(value_graduated)
     if slots > 0:
         momentum_map = {m["symbol"]: m.get("momentum", 0) for m in momentum_ranks}
-        # 先用便宜的動能/alpha 過濾縮小候選（避免對整個 S&P500 抓 yf.Ticker().info）
+        # 價值池與主動能池分離：先讓完整候選宇宙進入價值篩選，
+        # 不用動能排名預先截斷，避免漏掉「低估但動能尚未反應」的標的。
         held_all = set(positions) | set(value_positions)
-        low_momentum_syms = [
+        main_pool_symbols = {
+            a.get("symbol") for a in actions if a.get("action") == "ADD"
+        } | {
+            a.get("buy_symbol") for a in actions if a.get("action") == "ROTATE"
+        }
+        value_universe = [
             m["symbol"] for m in momentum_ranks
-            if m["symbol"] not in held_all and m.get("momentum", 0) <= 0
+            if m["symbol"] not in held_all
+            and m["symbol"] not in main_pool_symbols
         ]
-        # 動能越接近轉正（跌幅較淺）越可能是「還沒起漲」而非「結構性衰退」，優先評估
-        low_momentum_syms.sort(key=lambda s: momentum_map.get(s, -999), reverse=True)
-        value_screen_pool = low_momentum_syms[:80]  # 控制 alpha/fundamentals 抓取成本
 
-        value_alpha_3y_map = calculate_alpha_3y_batch(value_screen_pool)
-        alpha_ok_pool = [s for s in value_screen_pool if (value_alpha_3y_map.get(s) or -999) >= -20.0][:50]
+        # 3Y alpha 只用來排除結構性衰退，不是動能選股排名。
+        value_alpha_3y_map = calculate_alpha_3y_batch(value_universe)
+        alpha_ok_pool = [
+            s for s in value_universe
+            if value_alpha_3y_map.get(s) is not None
+            and value_alpha_3y_map[s] >= -20.0
+        ]
 
+        # fundamentals 有 7 天快取；對完整 alpha 合格宇宙抓取，確保價值池不漏掉低動能股票。
         value_fundamentals = get_fundamentals_batch(alpha_ok_pool) if alpha_ok_pool else {}
         value_screen_prices = fetch_current_prices(alpha_ok_pool) if alpha_ok_pool else {}
 
         value_candidates = screen_value_candidates(
             alpha_ok_pool, momentum_map, value_alpha_3y_map, value_fundamentals,
-            value_screen_prices, held_all, slots,
+            value_screen_prices, held_all, slots, excluded_symbols=main_pool_symbols,
         )
         for cand in value_candidates:
             value_actions.append({
@@ -1039,7 +1191,17 @@ def run_premarket(scan_tw=False, send_email=True):
                 "forward_pe": cand["forward_pe"], "peg": cand["peg"],
                 "target_mean": cand["target_mean"], "upside_pct": cand["upside_pct"],
                 "revenue_growth": cand["revenue_growth"], "sector": cand["sector"],
+                "earnings_growth": value_fundamentals.get(cand["symbol"], {}).get("earnings_growth"),
+                "gross_margin": value_fundamentals.get(cand["symbol"], {}).get("gross_margin"),
+                "operating_margin": value_fundamentals.get(cand["symbol"], {}).get("operating_margin"),
+                "free_cashflow": value_fundamentals.get(cand["symbol"], {}).get("free_cashflow"),
+                "operating_cashflow": value_fundamentals.get(cand["symbol"], {}).get("operating_cashflow"),
+                "total_debt": value_fundamentals.get(cand["symbol"], {}).get("total_debt"),
+                "total_cash": value_fundamentals.get(cand["symbol"], {}).get("total_cash"),
+                "roic": value_fundamentals.get(cand["symbol"], {}).get("roic"),
+                "shares_outstanding": value_fundamentals.get(cand["symbol"], {}).get("shares_outstanding"),
                 "alpha_3y": cand["alpha_3y"], "status": "pending",
+                "value_type": cand["value_type"], "momentum": cand["momentum"],
             })
 
     value_pool_snapshot = []
@@ -1091,6 +1253,8 @@ def run_premarket(scan_tw=False, send_email=True):
     actions_output = {
         "date": str(date.today()),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "quote_data_as_of": str(latest_valid_date) if latest_valid_date else None,
+        "quote_data_observed_as_of": str(latest_observed_date) if latest_observed_date else None,
         "version": VERSION,
         "portfolio_snapshot": {
             "total_value": round(total_value, 2),
@@ -1123,6 +1287,8 @@ def run_premarket(scan_tw=False, send_email=True):
         },
         "triple_warning": _triple,
         "value_actions": value_actions,
+        "fundamental_screen_candidates": fundamental_screen_candidates,
+        "fundamental_screen_total_passed": len(fundamental_screen_all_candidates),
         "value_pool_snapshot": value_pool_snapshot,
     }
 
@@ -1179,6 +1345,15 @@ def run_premarket(scan_tw=False, send_email=True):
     print()
     print(market_env["display_block"])
     print()
+
+    # ML 只作選股品質提示，不升級為市場級警告
+    _ml_quality = _triple.get("candidate_quality_warning", {})
+    if _ml_quality.get("triggered"):
+        print(
+            f"  ⚠️ ADD 候選 ML% 平均 {(_ml_quality.get('avg_ml_pct') or 0):.0f}%"
+            "（選股品質偏弱；不代表市場看空）"
+        )
+        print()
 
     # 三重警告
     if _triple["triggered"]:
@@ -1256,10 +1431,11 @@ def run_premarket(scan_tw=False, send_email=True):
             alert = "  ⚠️ 觸發賣出" if sym in wc_exits else ""
             print(f"  持有 {sym:<6}  P&L: {pnl_pct:+.0f}%  週期高點 ${cycle_high:.2f}  距高 {from_high:+.1f}%{alert}")
         for sym, entry in wc_watch.items():
-            price = current_prices.get(sym, 0)
             low = entry.get("post_exit_low", 0)
-            rec = (price / low - 1) * 100 if low else 0
-            print(f"  觀察 {sym:<6}  賣出 ${entry['exit_price']:.2f}  低點 ${low:.2f}  現在 ${price:.2f}  反彈 {rec:+.1f}%  冷卻至 {entry.get('cooldown_end', '?')}")
+            price_text, recovery_text = _format_winner_cycle_watch_quote(
+                current_prices.get(sym), low,
+            )
+            print(f"  觀察 {sym:<6}  賣出 ${entry['exit_price']:.2f}  低點 ${low:.2f}  現在 {price_text}  反彈 {recovery_text}  冷卻至 {entry.get('cooldown_end', '?')}")
         for a in wc_reentry_adds:
             print(f"  🔁 買回 {a['symbol']:<6}  建議 {a['suggested_shares']} 股 @ ${a.get('current_price', 0):.2f}  {a['reason']}")
         print()
@@ -1684,17 +1860,27 @@ def run_premarket(scan_tw=False, send_email=True):
         except Exception as e:
             print(f"⚠ 偏離成本追蹤失敗：{e}")
 
+    # 9.5 自動產生完整質化分析（若尚未由人工/外部流程產生）
+    qualitative_path = Path(f"data/qualitative_{date.today().strftime('%Y%m%d')}.json")
+    if not _ensure_qualitative_data(
+        actions_output, qualitative_path, skip_qualitative=skip_qualitative,
+    ):
+        return
+
     # 10. 發送 Email 通知
     if send_email:
         notifier = GmailNotifier()
         if notifier.is_configured():
             print("正在發送 Email 通知...")
-            if notifier.send_premarket_report(actions_output):
+            qualitative_data = _load_qualitative_data(qualitative_path)
+
+            if notifier.send_premarket_report(actions_output, qualitative_data=qualitative_data):
                 print(f"Email 已發送至 {notifier.recipient}")
             else:
                 print("Email 發送失敗，請檢查 .env 設定")
     else:
-        print("（--no-email：跳過 Email 發送）")
+        reason = "--skip-qualitative：略過分析並跳過 Email" if skip_qualitative else "--no-email：跳過 Email"
+        print(f"（{reason}）")
 
     print(f"\nActions 已儲存至: {actions_path}")
     print(f"確認執行請執行: python confirm_main.py {date.today()}")
@@ -1778,6 +1964,8 @@ def main():
     parser.add_argument("--deviation", nargs="?", const=30, type=int,
                         metavar="DAYS", help="偏離成本追蹤（預設近30天）")
     parser.add_argument("--no-email", action="store_true", help="跳過 Email 發送（測試用）")
+    parser.add_argument("--skip-qualitative", action="store_true",
+                        help="略過完整質化分析並停用 Email（只產生量化盤前建議）")
     args = parser.parse_args()
 
     if args.init:
@@ -1791,7 +1979,11 @@ def main():
     elif args.deviation:
         print_deviation_report(days=args.deviation)
     else:
-        run_premarket(scan_tw=args.tw, send_email=not args.no_email)
+        run_premarket(
+            scan_tw=args.tw,
+            send_email=not args.no_email and not args.skip_qualitative,
+            skip_qualitative=args.skip_qualitative,
+        )
 
 
 if __name__ == "__main__":

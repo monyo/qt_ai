@@ -52,6 +52,13 @@ _SECTOR_ZH = {
 }
 
 
+def _index_date(value):
+    """將 yfinance 時間索引值轉成 date；測試用數字索引回傳 None。"""
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return value.date()
+    return None
+
+
 def _get_sp500_df():
     """取得 S&P 500 Wikipedia 表格（module-level 快取，整個 session 只抓一次）"""
     global _SP500_DF_CACHE
@@ -81,23 +88,46 @@ def get_sp500_sector_map():
     }
 
 
+def fetch_current_prices_with_metadata(symbols):
+    """取得最新有效收盤價，並回傳資料源的觀測日期。
+
+    Returns:
+        tuple: ({symbol: price}, latest_valid_date, latest_observed_date)
+        日期無法從測試 fixture 或資料源解析時為 None。
+    """
+    prices = {}
+    valid_dates = []
+    observed_dates = []
+    for symbol in symbols:
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="5d", auto_adjust=True)
+            if not hist.empty:
+                observed_date = _index_date(hist.index[-1])
+                if observed_date is not None:
+                    observed_dates.append(observed_date)
+            closes = hist["Close"].dropna() if "Close" in hist else pd.Series(dtype=float)
+            if not closes.empty:
+                prices[symbol] = round(float(closes.iloc[-1]), 2)
+                valid_date = _index_date(closes.index[-1])
+                if valid_date is not None:
+                    valid_dates.append(valid_date)
+        except Exception as e:
+            print(f"⚠ 無法取得 {symbol} 報價: {e}")
+    return (
+        prices,
+        max(valid_dates) if valid_dates else None,
+        max(observed_dates) if observed_dates else None,
+    )
+
+
 def fetch_current_prices(symbols):
     """批次取得最新收盤價（前一個交易日 Close）
 
     盤前執行時，yfinance 回傳的最新 Close 即為昨日收盤。
     回傳 dict: {symbol: price}
     """
-    prices = {}
-    for symbol in symbols:
-        try:
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="5d", auto_adjust=True)
-            closes = hist["Close"].dropna() if "Close" in hist else pd.Series(dtype=float)
-            if not closes.empty:
-                prices[symbol] = round(float(closes.iloc[-1]), 2)
-        except Exception as e:
-            print(f"⚠ 無法取得 {symbol} 報價: {e}")
-    return prices
+    return fetch_current_prices_with_metadata(symbols)[0]
 
 
 def get_earnings_days_batch(symbols):
@@ -132,6 +162,10 @@ def get_earnings_days_batch(symbols):
 
 
 _FUNDAMENTALS_CACHE_PATH = "data/_fundamentals_cache.json"
+_FUNDAMENTALS_FIELDS = (
+    "gross_margin", "operating_margin", "free_cashflow", "operating_cashflow",
+    "total_debt", "total_cash", "roic", "shares_outstanding",
+)
 
 
 def get_fundamentals_batch(symbols, cache_days=7):
@@ -142,7 +176,9 @@ def get_fundamentals_batch(symbols, cache_days=7):
 
     Returns:
         dict: {symbol: {pe, forward_pe, peg, target_mean, target_high, target_low,
-                         analyst_count, revenue_growth, sector, fetched_date}}
+                         analyst_count, revenue_growth, gross_margin, operating_margin,
+                         free_cashflow, operating_cashflow, total_debt, total_cash,
+                         roic, shares_outstanding, earnings_growth, sector, fetched_date}}
         查無資料或發生例外的標的不會出現在結果中。
     """
     if not os.path.exists('data'):
@@ -165,7 +201,10 @@ def get_fundamentals_batch(symbols, cache_days=7):
         if cached:
             try:
                 fetched_date = datetime.fromisoformat(cached["fetched_date"]).date()
-                if (today - fetched_date).days < cache_days:
+                if (
+                    (today - fetched_date).days < cache_days
+                    and all(field in cached for field in _FUNDAMENTALS_FIELDS)
+                ):
                     result[symbol] = cached
                     continue
             except Exception:
@@ -182,6 +221,17 @@ def get_fundamentals_batch(symbols, cache_days=7):
                 "target_low": info.get("targetLowPrice"),
                 "analyst_count": info.get("numberOfAnalystOpinions"),
                 "revenue_growth": info.get("revenueGrowth"),
+                "earnings_growth": info.get("earningsGrowth"),
+                "gross_margin": info.get("grossMargins"),
+                "operating_margin": info.get("operatingMargins"),
+                "free_cashflow": info.get("freeCashflow"),
+                "operating_cashflow": info.get("operatingCashflow"),
+                "total_debt": info.get("totalDebt"),
+                "total_cash": info.get("totalCash"),
+                "roic": info.get("returnOnInvestedCapital"),
+                "shares_outstanding": info.get("sharesOutstanding"),
+                "market_cap": info.get("marketCap"),
+                "enterprise_value": info.get("enterpriseValue"),
                 "sector": info.get("sector"),
                 "fetched_date": today.isoformat(),
             }

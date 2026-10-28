@@ -1,4 +1,4 @@
-執行盤前分析系統，產出今日 ADD/EXIT/HOLD 建議，並對矛盾訊號的標的加入質化分析。
+執行完整盤前分析系統，產出今日 ADD/EXIT/HOLD 建議；質化分析不是只處理矛盾訊號，必須涵蓋規則指定的動能、ROTATE、備選與價值實驗池候選。未完成質化分析 JSON 前不得寄送完整報告。
 
 步驟：
 
@@ -14,16 +14,23 @@ conda run -n qt_env python premarket_main.py --no-email
 
 ## 3. 識別需要質化分析的候選標的
 
-從 ADD 與 ROTATE actions 中找出符合以下任一條件的標的：
+建立「完整且去重」的質化分析清單；從 ADD、ROTATE、以及 `value_actions` 中找出符合以下任一條件的標的（不要只挑幾檔代表）：
 - RSI > 75（`rsi` 欄位）
 - 趨勢狀態為「轉弱」（`trend_state == "轉弱"`）
 - 備選清單（`is_backup == true`）
 - ROTATE 換入目標（action == "ROTATE" 的 `buy_symbol`）
 - ROTATE 賣出標的（action == "ROTATE" 的 `sell_symbol`）——**必做**：現行邏輯已加上「自身動能須比 2 個月前更差」的量化檢查（見 `src/premarket.py` `_self_momentum_not_declining`），但量化過濾不出「這次轉弱是基本面確實惡化，還是財報型錯殺/短期雜訊」，賣出端跟買入端一樣值得把關，不要預設賣出一定合理
+- 價值實驗池的全部 `VALUE_ADD`（**必做**）：價值池是獨立的估值/基本面掃描，不是主動能池的子集；優先關注動能 ≤ 0、但不能因動能正負漏掉任何候選。標記為 `Early Value`（動能 ≤ 0）或 `Value With Confirmation`（動能 > 0），兩者都必須分析。
+
+**重要**：質化分析清單不只包含動能矛盾訊號；`VALUE_ADD` 是獨立的基本面/估值策略，與主動能池無關，全部都要分析。分析完成後先寫入 JSON，再執行 `send_report.py` 寄信。
 
 ## 4. 質化分析
 
-對每個識別出的標的，以 Claude 在 context 內做分析，評估：
+對每個識別出的標的，由 Hermes 目前設定的模型在研究資料與可查證來源上做分析，評估：
+
+**策略分類**：`Momentum` / `ROTATE` / `Early Value` / `Value With Confirmation`
+
+**四維判斷**：分開評估基本面論點、估值安全邊際、動能確認程度、目前進場時機；不能把長期催化劑直接等同於現在適合買入。
 
 **觸發說明**：為何觸發質化分析（RSI 過高、趨勢轉弱、備選清單、ROTATE 賣出標的等）
 
@@ -42,6 +49,8 @@ conda run -n qt_env python premarket_main.py --no-email
 - 40-59：⚠️ 等待（暫不建議，等信號改善）
 - 0-39：❌ 不建議（明確的反對理由）
 
+**失效條件**（1句）：什麼新資訊會推翻目前的投資論點？
+
 ## 5. 寫入質化分析 JSON
 
 將分析結果寫入 `data/qualitative_YYYYMMDD.json`（今天日期），格式如下：
@@ -53,10 +62,15 @@ conda run -n qt_env python premarket_main.py --no-email
     {
       "symbol": "XXX",
       "trigger": "RSI 91",
+      "strategy_type": "Momentum",
+      "valuation": "估值合理／偏貴／低估",
+      "momentum_state": "動能已確認／尚未反應",
+      "timing": "可買／等拉回／等待確認",
       "score": 62,
       "verdict": "🟡 可考慮",
       "catalyst": "...",
       "risk": "...",
+      "invalidation": "...",
       "recommendation": "..."
     }
   ]

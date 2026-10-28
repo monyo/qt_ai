@@ -1,7 +1,8 @@
 """價值實驗池（Value Experiment Pool）
 
-獨立於主動能池的真金白銀前瞻實驗：篩選基本面便宜、動能還沒起來的標的，
-驗證「低估反轉」這個與主策略相反的因子是否有效。最多同時 5 檔，不設總金額上限。
+獨立於主動能池的真金白銀前瞻實驗：篩選基本面便宜、可能尚未被市場充分反映的標的，驗證「低估反轉」因子是否有效。
+動能只作為結果標籤與追蹤欄位，不是價值池的預先篩選門檻。
+最多同時 5 檔，不設總金額上限。
 
 設計依據見 /home/mark/.claude/plans/crystalline-shimmying-clarke.md：
 - 不做歷史回測（yfinance 基本面資料無 point-in-time，回測等於用未來函數）
@@ -28,18 +29,21 @@ VALUE_MIN_REVENUE_GROWTH = 0.0
 VALUE_ALPHA_3Y_FLOOR = -20.0     # 3Y alpha（百分點）門檻，排除結構性衰退股
 
 
-def screen_value_candidates(symbols, momentum_map, alpha_3y_map, fundamentals, current_prices, held_symbols, slots):
-    """粗篩「動能還沒起來、但基本面便宜」的候選，回傳最多 slots 檔
+def screen_value_candidates(symbols, momentum_map, alpha_3y_map, fundamentals, current_prices, held_symbols, slots,
+                            excluded_symbols=None):
+    """粗篩完整價值宇宙中的便宜候選，回傳最多 slots 檔。
+
+    動能不參與入池資格判斷，只用於標記候選目前是否已開始被市場確認。
 
     Args:
-        symbols: 候選標的清單（通常是 S&P 500 全部）
-        momentum_map: {symbol: momentum_score}，用於排除「動能已經很強」的標的
-                      （動能強的本來就會被主池選中，價值池只找主池看不上的）
+        symbols: 完整候選標的清單（通常是 S&P 500 全部）
+        momentum_map: {symbol: momentum_score}，僅用於結果標記，不作為篩選條件
         alpha_3y_map: {symbol: alpha_3y}，百分點（如 -20 代表 -20%）
         fundamentals: {symbol: {...}}，來自 data_loader.get_fundamentals_batch()
         current_prices: {symbol: price}，用於算目標價上檔空間
         held_symbols: 已持有標的（主池 + 價值池），排除重複布局
         slots: 還可以新增幾檔
+        excluded_symbols: 已在主 ADD/ROTATE 清單的標的，避免與主池重複建議
 
     Returns:
         list[dict]: [{symbol, forward_pe, peg, target_mean, upside_pct,
@@ -49,9 +53,11 @@ def screen_value_candidates(symbols, momentum_map, alpha_3y_map, fundamentals, c
     if slots <= 0:
         return []
 
+    excluded_symbols = set(excluded_symbols or ())
+
     pool = []
     for sym in symbols:
-        if sym in held_symbols:
+        if sym in held_symbols or sym in excluded_symbols:
             continue
 
         alpha_3y = alpha_3y_map.get(sym)
@@ -59,8 +65,6 @@ def screen_value_candidates(symbols, momentum_map, alpha_3y_map, fundamentals, c
             continue  # 排除結構性衰退股
 
         momentum = momentum_map.get(sym)
-        if momentum is not None and momentum > 0:
-            continue  # 動能已經轉強的標的交給主池，不重複布局
 
         fnd = fundamentals.get(sym)
         if not fnd:
@@ -97,10 +101,93 @@ def screen_value_candidates(symbols, momentum_map, alpha_3y_map, fundamentals, c
             "sector": fnd.get("sector"),
             "momentum": momentum,
             "alpha_3y": alpha_3y,
+            "value_type": "value_with_confirmation" if (momentum or 0) > 0 else "early_value",
         })
 
     pool.sort(key=lambda c: c["upside_pct"], reverse=True)
     return pool[:slots]
+
+
+def screen_independent_fundamental_candidates(symbols, fundamentals, current_prices):
+    """從完整股票宇宙獨立初篩基本面/估值候選，不使用動能或價格報酬訊號。
+
+    目標價上檔只用作研究線索，不能當作內在價值或買進結論。
+    """
+    candidates = []
+    for symbol in symbols:
+        fnd = fundamentals.get(symbol)
+        price = current_prices.get(symbol)
+        if not fnd or not price or price <= 0:
+            continue
+
+        forward_pe = fnd.get("forward_pe")
+        peg = fnd.get("peg")
+        revenue_growth = fnd.get("revenue_growth")
+        target_mean = fnd.get("target_mean")
+        if forward_pe is None or not 0 < forward_pe <= VALUE_MAX_FORWARD_PE:
+            continue
+        if peg is not None and not 0 < peg <= VALUE_MAX_PEG:
+            continue
+        if revenue_growth is None or revenue_growth < VALUE_MIN_REVENUE_GROWTH:
+            continue
+        if not target_mean or target_mean <= 0:
+            continue
+
+        upside_pct = (target_mean / price - 1) * 100
+        if upside_pct < VALUE_MIN_UPSIDE * 100:
+            continue
+
+        candidates.append({
+            "symbol": symbol,
+            "forward_pe": forward_pe,
+            "peg": peg,
+            "target_mean": target_mean,
+            "upside_pct": round(upside_pct, 1),
+            "revenue_growth": revenue_growth,
+            "earnings_growth": fnd.get("earnings_growth"),
+            "gross_margin": fnd.get("gross_margin"),
+            "operating_margin": fnd.get("operating_margin"),
+            "free_cashflow": fnd.get("free_cashflow"),
+            "operating_cashflow": fnd.get("operating_cashflow"),
+            "total_debt": fnd.get("total_debt"),
+            "total_cash": fnd.get("total_cash"),
+            "roic": fnd.get("roic"),
+            "shares_outstanding": fnd.get("shares_outstanding"),
+            "market_cap": fnd.get("market_cap"),
+            "enterprise_value": fnd.get("enterprise_value"),
+            "sector": fnd.get("sector"),
+            "current_price": price,
+            "screen_source": "S&P 500 fundamentals/valuation; no momentum or return filters",
+        })
+
+    candidates.sort(key=lambda item: item["upside_pct"], reverse=True)
+    return candidates
+
+
+def prioritize_fundamental_screen_candidates(candidates, limit=20):
+    """按可得的基本面品質訊號排序；目標價上檔僅作次要排序依據。"""
+    quality_fields = (
+        "free_cashflow", "operating_cashflow", "roic",
+        "gross_margin", "operating_margin",
+    )
+    ranked = []
+    for candidate in candidates:
+        observed = [candidate[field] for field in quality_fields if candidate.get(field) is not None]
+        score = sum(value > 0 for value in observed)
+        ranked.append({
+            **candidate,
+            "screen_quality_score": score,
+            "screen_quality_coverage": len(observed),
+        })
+    ranked.sort(
+        key=lambda item: (
+            item["screen_quality_score"],
+            item["screen_quality_coverage"],
+            item.get("upside_pct", 0),
+        ),
+        reverse=True,
+    )
+    return ranked[:max(0, limit)]
 
 
 def check_value_exits(value_positions, current_prices, fundamentals_now):

@@ -38,7 +38,8 @@ def main():
             qualitative_data = json.load(f)
         print(f"載入質化分析：{len(qualitative_data.get('analyses', []))} 筆")
     else:
-        print("（無質化分析檔，直接寄送原始報告）")
+        print("找不到質化分析檔，為避免寄出不完整報告而停止")
+        sys.exit(1)
 
     notifier = GmailNotifier()
     if not notifier.is_configured():

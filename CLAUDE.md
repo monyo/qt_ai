@@ -180,9 +180,11 @@ Quantitative stock scanning + position management system. Combines technical ana
 - **市場廣度**：S&P500 % 股票 > MA50，分 5 級（健康/偏弱/弱/危險/極危險），建議 ADD ≤ 對應支數
 - **市場環境**：VIX + WTI 油價（USO ETF）組合判斷 4 種體制，滯脹恐慌時能源族群 ML% 高
 - **ML% 評分**：XGBoost 預測「打敗 SPY 的機率」（>50% = 模型看好）。首次使用自動訓練（~3-5 分鐘），之後讀快取 <1 秒。不需每日重訓，建議每季更新一次（刪 `data/_ml_model.pkl` 強制重訓）
+- **盤前質化分析（每次必做）**：質化分析不只針對動能矛盾訊號；候選集合必須包含 RSI >75、趨勢「轉弱」、ADD 備選、ROTATE 換入與賣出兩端，以及所有 `VALUE_ADD`。`VALUE_ADD` 是獨立的估值/基本面策略，與主動能池無關，即使動能已轉正也必須分析；完成分析並寫入 `data/qualitative_YYYYMMDD.json` 後才能寄送完整報告
 - **價值實驗池（Value Experiment Pool）**（v0.11.0，`src/value_pool.py`，2026-09-02 上線）：
   - **動機**：主池是純動能（強者恆強），刻意不做「低估但動能未起」的選股。此為相反因子的真金白銀前瞻實驗，**不做歷史回測**——yfinance 基本面（PE/PEG/目標價）只有「現在」快照，無 point-in-time 歷史資料，回測等於用未來函數騙自己
-  - **篩選**（`screen_value_candidates`）：動能 ≤0（主池看不上的）+ 3Y alpha > -20%（排除結構性衰退）+ forward PE < 25 + PEG < 1.5 + 分析師目標價上檔 > 15% + 營收成長 ≥0，按上檔空間排序，最多同時 5 檔，不設總金額上限（逐檔決定）
+  - **篩選**（`screen_value_candidates`）：完整掃描候選宇宙，動能只作結果標籤，不作價值池入池門檻；所有候選皆須通過 3Y alpha > -20%（排除結構性衰退）+ forward PE < 25 + PEG < 1.5 + 分析師目標價上檔 > 15% + 營收成長 ≥0，按上檔空間排序，最多同時 5 檔，不設總金額上限（逐檔決定）
+  - **掃描範圍與成本控制**：動能排名先掃 S&P 500 全部（加白名單與持倉）；價值池對完整候選宇宙計算 3Y alpha，再對 alpha 合格宇宙抓基本面快照（7 天快取），不預先用動能排名截斷，避免漏掉動能尚未反應的低估標的
   - **基本面快取**：`get_fundamentals_batch()`（`src/data_loader.py`）存 `data/_fundamentals_cache.json`，7 天內不重抓
   - **四層出場**（`check_value_exits`，依序檢查、互斥）：硬停損 -20% → 停利（達目標價 90%）→ 基本面轉壞（目標價下修 >15%）→ 時間停損（6個月內 ±10% 盤整）
   - **畢業機制**（`check_value_graduation`）：動能轉強到符合主池雙 alpha 門檻（1Y>0 且 3Y>-30%）且排名進前 50 → 內部轉籍進主池 `positions`（標準批次），不經過 confirm、不是真實交易，同時記一筆 `exit_reason="graduated"` 到 log
