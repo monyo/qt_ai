@@ -850,9 +850,13 @@ def run_premarket(scan_tw=False, send_email=True, skip_qualitative=False):
     actions = generate_actions(portfolio, current_prices, ma200_prices, momentum_ranks, alpha_1y_map, trend_state_map, alpha_3y_map, market_regime=regime["regime"],
                                vix=market_env.get("vix_level", 20.0), volumes=held_volumes, vol_map=vol_map)
 
-    # 5.1 儲存 pending 停損狀態（stop_pending_since 已寫入 portfolio tranches）
-    has_pending = any(a.get("stop_pending") for a in actions if a["action"] == "HOLD")
-    if has_pending:
+    # 5.1 儲存停損確認狀態（stop_pending_since / stop_confirmed_since 已寫入 portfolio tranches）
+    has_stop_state = any(
+        t.get("stop_pending_since") or t.get("stop_confirmed_since")
+        for pos in portfolio.get("positions", {}).values()
+        for t in pos.get("tranches", [])
+    )
+    if has_stop_state or any(a["action"] == "EXIT" for a in actions):
         save_portfolio(portfolio)
 
     # 5.2 注入 Winner Cycle EXIT 訊號（特殊池標的從週期高點回落 -10%）
@@ -860,7 +864,9 @@ def run_premarket(scan_tw=False, send_email=True, skip_qualitative=False):
     _wc_action_id = max((a.get("id", 0) for a in actions), default=0)
     for sym, wc in wc_exits.items():
         if sym in existing_exit_syms:
-            continue  # 已有停損信號，不重複
+            # 部分批次停損 + 特殊池整檔出場 → 以整檔出場取代，避免剩餘批次被留在 HOLD
+            actions = [a for a in actions
+                       if not (a.get("symbol") == sym and a["action"] in ("EXIT", "HOLD"))]
         _wc_action_id += 1
         actions.insert(0, {
             "id": _wc_action_id,

@@ -254,6 +254,7 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
 
             if days_held < params["protect"]:
                 t.pop("stop_pending_since", None)
+                t.pop("stop_confirmed_since", None)
                 continue
 
             n           = t["n"]
@@ -277,34 +278,38 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
             trail_hit   = t_high > 0 and price <= trailing_stop_price
             stop_hit    = fixed_hit or trail_hit
 
-            # ── 價格回復：清除待確認 ──────────────────────────────────────
+            # ── 價格回復：清除待確認 / 已確認 ─────────────────────────────
             if not stop_hit:
-                if t.get("stop_pending_since"):
-                    t.pop("stop_pending_since", None)
-                # 3. MA200 停損（不做兩日確認）
-                if stop_type == "standard":
-                    ma200 = ma200_prices.get(symbol)
-                    if ma200 is not None and price < ma200:
+                t.pop("stop_pending_since", None)
+                t.pop("stop_confirmed_since", None)
+
+            # 3. MA200 停損 / 4. 極端停損（不做兩日確認）
+            # 固定/追蹤停損待確認期間也要檢查，否則會被兩日確認延後
+            if stop_type == "standard":
+                ma200 = ma200_prices.get(symbol)
+                if ma200 is not None and price < ma200:
+                    sym_exits.append({
+                        "tranche_n":      n,
+                        "tranche_shares": t_shares,
+                        "reason":         "ma200_stop",
+                        "message":        f"跌破 MA200（第{n}批，MA200 ${ma200:.2f}，{(price-ma200)/ma200*100:.1f}%）",
+                        "details":        {"ma200": ma200, "current_price": price},
+                    })
+                    continue
+                avg_price = pos.get("avg_price", entry_price)
+                if avg_price > 0:
+                    pnl_pct = (price - avg_price) / avg_price
+                    if pnl_pct <= hard_threshold:
                         sym_exits.append({
                             "tranche_n":      n,
                             "tranche_shares": t_shares,
-                            "reason":         "ma200_stop",
-                            "message":        f"跌破 MA200（第{n}批，MA200 ${ma200:.2f}，{(price-ma200)/ma200*100:.1f}%）",
-                            "details":        {"ma200": ma200, "current_price": price},
+                            "reason":         "extreme_stop",
+                            "message":        f"極端停損觸發（第{n}批，從成本 {pnl_pct*100:.1f}%）",
+                            "details":        {"avg_price": avg_price, "pnl_pct": pnl_pct, "current_price": price},
                         })
                         continue
-                    # 4. 極端停損（-35%，不做兩日確認）
-                    avg_price = pos.get("avg_price", entry_price)
-                    if avg_price > 0:
-                        pnl_pct = (price - avg_price) / avg_price
-                        if pnl_pct <= hard_threshold:
-                            sym_exits.append({
-                                "tranche_n":      n,
-                                "tranche_shares": t_shares,
-                                "reason":         "extreme_stop",
-                                "message":        f"極端停損觸發（第{n}批，從成本 {pnl_pct*100:.1f}%）",
-                                "details":        {"avg_price": avg_price, "pnl_pct": pnl_pct, "current_price": price},
-                            })
+
+            if not stop_hit:
                 continue
 
             # ── 固定/追蹤停損觸發（應用兩日確認）────────────────────────
@@ -333,9 +338,13 @@ def check_all_exit_conditions(positions, current_prices, ma200_prices,
             }
 
             pending_since = t.get("stop_pending_since")
-            if pending_since and pending_since < today_str:
+            confirmed_since = t.get("stop_confirmed_since")
+            if confirmed_since or (pending_since and pending_since < today_str):
                 # 第二日確認（非同日重跑）→ 真正出場
+                # 保留已確認標記：未執行時隔日不會被重置回「第一日待確認」，
+                # 直到價格回到停損線上方或該批次被 confirm 移除
                 t.pop("stop_pending_since", None)
+                t["stop_confirmed_since"] = confirmed_since or today_str
                 sym_exits.append(item)
             else:
                 # 第一日（或同日重跑）→ 設待確認
@@ -431,6 +440,10 @@ def update_winner_cycle_highs(portfolio, current_prices, alpha_1y_map=None):
             else:
                 pos["winner_cycle_high"] = max(pos["winner_cycle_high"], price)
         else:
+            cycle_high = pos.get("winner_cycle_high")
+            if cycle_high and price <= cycle_high * (1 - WINNER_CYCLE_PULLBACK):
+                # 回落本身會拉低 1Y alpha；出場訊號觸發中不可因此出池，否則未執行的 EXIT 會消失
+                continue
             pos.pop("winner_cycle_high", None)
             pos.pop("winner_cycle_pool_date", None)
     return newly_entered

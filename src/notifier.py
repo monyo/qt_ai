@@ -396,8 +396,8 @@ class GmailNotifier:
 
         # Actions 分類
         exits = [a for a in actions if a["action"] == "EXIT"]
-        new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
-        pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid")]
+        new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid") and not a.get("wc_suppressed")]
+        pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid") and not a.get("wc_suppressed")]
         rotates = [a for a in actions if a["action"] == "ROTATE"]
         holds = [a for a in actions if a["action"] == "HOLD"]
 
@@ -572,9 +572,9 @@ class GmailNotifier:
         # 分類 actions
         exits = [a for a in actions if a["action"] == "EXIT"]
         holds = [a for a in actions if a["action"] == "HOLD"]
-        new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
-        pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid")]
-        backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
+        new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid") and not a.get("wc_suppressed")]
+        pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid") and not a.get("wc_suppressed")]
+        backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup") and not a.get("wc_suppressed")]
         adds = new_adds  # 向下相容
 
         if exits:
@@ -838,9 +838,9 @@ class GmailNotifier:
         # Actions 表格
         exits = [a for a in actions if a["action"] == "EXIT"]
         holds = [a for a in actions if a["action"] == "HOLD"]
-        new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid")]
-        pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid")]
-        backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup")]
+        new_adds = [a for a in actions if a["action"] == "ADD" and not a.get("is_backup") and not a.get("is_pyramid") and not a.get("wc_suppressed")]
+        pyramid_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_pyramid") and not a.get("wc_suppressed")]
+        backup_adds = [a for a in actions if a["action"] == "ADD" and a.get("is_backup") and not a.get("wc_suppressed")]
         adds = new_adds
         rotates_sell = {a["sell_symbol"] for a in actions if a["action"] == "ROTATE"}
 
